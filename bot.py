@@ -2,7 +2,6 @@ import os
 import asyncio
 import decimal
 import json
-import ast
 import asyncpg
 import aiohttp
 import uuid
@@ -292,37 +291,6 @@ def inline_check(trade_id: str) -> InlineKeyboardMarkup:
         ]
     )
 
-# ================== PARSER ==================
-def parse_loose_json(text: str) -> dict:
-    text = (text or "").strip()
-    if not text:
-        raise RuntimeError("Пустой ответ от платёжной системы")
-
-    try:
-        data = json.loads(text)
-        if isinstance(data, dict):
-            return data
-    except Exception:
-        pass
-
-    try:
-        data = ast.literal_eval(text)
-        if isinstance(data, dict):
-            return data
-    except Exception:
-        pass
-
-    raise RuntimeError(f"Не удалось распарсить ответ PaySync: {text[:500]}")
-
-
-async def safe_read_response(resp: aiohttp.ClientResponse) -> dict:
-    text = await resp.text()
-
-    if resp.status >= 400:
-        raise RuntimeError(f"HTTP {resp.status}: {text[:500]}")
-
-    return parse_loose_json(text)
-
 # ================== PAYMENT ==================
 async def paysync_create(amount: int, data: str) -> dict:
     url = f"[paysync.bot](https://paysync.bot/api/client{CLIENT_ID}/amount{amount}/currency{PAYSYNC_CURRENCY})"
@@ -330,7 +298,15 @@ async def paysync_create(amount: int, data: str) -> dict:
 
     async with aiohttp.ClientSession() as session:
         async with session.get(url, headers=headers, params={"data": data}, timeout=30) as resp:
-            return await safe_read_response(resp)
+            raw_text = await resp.text()
+
+            if resp.status >= 400:
+                raise RuntimeError(f"PaySync HTTP {resp.status}: {raw_text[:300]}")
+
+            try:
+                return json.loads(raw_text)
+            except Exception as e:
+                raise RuntimeError(f"PaySync вернул не JSON: {raw_text[:300]} | parse error: {e}")
 
 
 async def paysync_check(trade_id: str) -> dict:
@@ -339,24 +315,29 @@ async def paysync_check(trade_id: str) -> dict:
 
     async with aiohttp.ClientSession() as session:
         async with session.get(url, headers=headers, timeout=30) as resp:
-            return await safe_read_response(resp)
+            raw_text = await resp.text()
+
+            if resp.status >= 400:
+                raise RuntimeError(f"PaySync HTTP {resp.status}: {raw_text[:300]}")
+
+            try:
+                return json.loads(raw_text)
+            except Exception as e:
+                raise RuntimeError(f"PaySync check вернул не JSON: {raw_text[:300]} | parse error: {e}")
 
 
 def extract_trade_id(js: dict) -> str:
-    trade_id = js.get("trade") or js.get("trade_id") or js.get("id")
-    if not trade_id:
-        raise RuntimeError(f"PaySync не вернул trade_id: {js}")
+    trade_id = js.get("trade")
+    if trade_id is None:
+        raise RuntimeError(f"В ответе PaySync нет поля trade: {js}")
     return str(trade_id)
 
 
 def extract_card_number(js: dict) -> str:
-    return str(
-        js.get("card_number")
-        or js.get("card")
-        or js.get("card_num")
-        or js.get("requisites")
-        or ""
-    ).strip()
+    card = js.get("card_number")
+    if not card:
+        return ""
+    return str(card).strip()
 
 
 def extract_status(js: dict) -> str:
@@ -366,10 +347,16 @@ def extract_status(js: dict) -> str:
 def extract_amount(js: dict, fallback: int) -> int:
     raw = js.get("amount", fallback)
     try:
-        return int(decimal.Decimal(str(raw)))
+        return int(raw)
     except Exception:
-        return fallback
+        try:
+            return int(decimal.Decimal(str(raw)))
+        except Exception:
+            return fallback
 
+
+def extract_paysync_time(js: dict) -> str:
+    return str(js.get("time", "")).strip()
 
 # ================== FSM ==================
 class TopupStates(StatesGroup):
@@ -492,6 +479,7 @@ async def topup_amount(message: Message, state: FSMContext):
         trade_id = extract_trade_id(js)
         card_number = extract_card_number(js)
         real_amount = extract_amount(js, amount)
+        paysync_time = extract_paysync_time(js)
         expires_at = utc_now() + timedelta(minutes=PAYMENT_TIMEOUT_MINUTES)
 
         assert pool is not None
@@ -519,16 +507,17 @@ async def topup_amount(message: Message, state: FSMContext):
         text = (
             "💳 Оплата через PaySync\n\n"
             f"🧾 Заявка: {trade_id}\n"
-            f"💳 Карта для оплаты:\n{card_number or 'карта не пришла'}\n"
+            f"💳 Карта для оплаты:\n{card_number or 'не получена'}\n"
             f"💰 Сумма: {real_amount} {PAYSYNC_CURRENCY}\n"
-            f"⏳ Срок оплаты: до {dt_to_text(expires_at)}\n\n"
+            f"⏳ Срок оплаты: до {paysync_time or dt_to_text(expires_at)}\n\n"
             "Оплачивай одним переводом и точно по указанной сумме.\n"
             "После перевода нажми кнопку проверки ниже."
         )
         await message.answer(text, reply_markup=inline_check(trade_id))
 
     except Exception as e:
-        await message.answer(f"❌ Не удалось создать платёж.\n{e}")
+        print(f"[TOPUP ERROR] {repr(e)}")
+        await message.answer(f"❌ Не удалось создать платёж.\n{str(e)[:500]}")
     finally:
         await state.clear()
 
@@ -640,12 +629,14 @@ async def cb_pay_card(call: CallbackQuery):
                 price = int(decimal.Decimal(product["price"]))
                 nonce = uuid.uuid4().hex[:12]
                 payload = f"buy:{uid}:{code}:{nonce}"
+                product_name = product["name"]
 
         js = await paysync_create(price, payload)
 
         trade_id = extract_trade_id(js)
         card_number = extract_card_number(js)
         real_amount = extract_amount(js, price)
+        paysync_time = extract_paysync_time(js)
         expires_at = utc_now() + timedelta(minutes=PAYMENT_TIMEOUT_MINUTES)
 
         async with pool.acquire() as con:
@@ -672,11 +663,11 @@ async def cb_pay_card(call: CallbackQuery):
 
         text = (
             "💳 Оплата через PaySync\n\n"
-            f"📦 Товар: {product['name']}\n"
+            f"📦 Товар: {product_name}\n"
             f"🧾 Заявка: {trade_id}\n"
-            f"💳 Карта для оплаты:\n{card_number or 'карта не пришла'}\n"
+            f"💳 Карта для оплаты:\n{card_number or 'не получена'}\n"
             f"💰 Сумма: {real_amount} {PAYSYNC_CURRENCY}\n"
-            f"⏳ Срок оплаты: до {dt_to_text(expires_at)}\n\n"
+            f"⏳ Срок оплаты: до {paysync_time or dt_to_text(expires_at)}\n\n"
             "Товар зарезервирован за тобой на время оплаты.\n"
             "Оплачивай одним переводом и точно по указанной сумме.\n"
             "После перевода нажми кнопку проверки ниже."
@@ -684,7 +675,7 @@ async def cb_pay_card(call: CallbackQuery):
         await call.message.answer(text, reply_markup=inline_check(trade_id))
 
     except Exception as e:
-        # если создание счёта упало — снимаем резерв
+        assert pool is not None
         async with pool.acquire() as con:
             await con.execute("""
                 UPDATE products
@@ -692,7 +683,8 @@ async def cb_pay_card(call: CallbackQuery):
                 WHERE code=$1 AND reserved_by=$2 AND sold_at IS NULL
             """, code, uid)
 
-        await call.message.answer(f"❌ Не удалось создать заявку на оплату.\n{e}")
+        print(f"[CARD ERROR] {repr(e)}")
+        await call.message.answer(f"❌ Не удалось создать заявку на оплату.\n{str(e)[:500]}")
 
 
 @dp.callback_query(F.data.startswith("pay:crypto:"))
@@ -847,7 +839,8 @@ async def cb_check(call: CallbackQuery):
             return
 
     except Exception as e:
-        await call.message.answer(f"❌ Ошибка проверки оплаты:\n{e}")
+        print(f"[CHECK ERROR] {repr(e)}")
+        await call.message.answer(f"❌ Ошибка проверки оплаты:\n{str(e)[:500]}")
 
 
 @dp.message(F.text.startswith("/addproduct"))
@@ -889,7 +882,7 @@ async def cmd_add(message: Message):
         await message.answer(f"✅ Товар добавлен: {code}")
 
     except Exception as e:
-        await message.answer(f"❌ Ошибка: {e}")
+        await message.answer(f"❌ Ошибка: {str(e)[:500]}")
 
 
 async def main():
