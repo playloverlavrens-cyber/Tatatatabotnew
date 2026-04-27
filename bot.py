@@ -122,6 +122,14 @@ async def db_init() -> None:
     pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=10)
 
     async with pool.acquire() as con:
+        # Удаляем старые таблицы если есть
+        await con.execute("DROP TABLE IF EXISTS promo_usage CASCADE")
+        await con.execute("DROP TABLE IF EXISTS promo_codes CASCADE")
+        await con.execute("DROP TABLE IF EXISTS invoices CASCADE")
+        await con.execute("DROP TABLE IF EXISTS purchases CASCADE")
+        await con.execute("DROP TABLE IF EXISTS stock CASCADE")
+        await con.execute("DROP TABLE IF EXISTS users CASCADE")
+
         await con.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id BIGINT PRIMARY KEY,
@@ -131,6 +139,7 @@ async def db_init() -> None:
             )
         """)
 
+        # Таблица товаров по районам
         await con.execute("""
             CREATE TABLE IF NOT EXISTS stock (
                 id BIGSERIAL PRIMARY KEY,
@@ -151,6 +160,7 @@ async def db_init() -> None:
             CREATE TABLE IF NOT EXISTS purchases (
                 id BIGSERIAL PRIMARY KEY,
                 user_id BIGINT REFERENCES users(user_id) ON DELETE CASCADE,
+                stock_id BIGINT REFERENCES stock(id),
                 product_name TEXT,
                 district TEXT,
                 city TEXT,
@@ -161,12 +171,6 @@ async def db_init() -> None:
             )
         """)
 
-        # Добавляем колонку если её нет
-        try:
-            await con.execute("ALTER TABLE invoices ADD COLUMN stock_id BIGINT")
-        except:
-            pass
-
         await con.execute("""
             CREATE TABLE IF NOT EXISTS invoices (
                 trade_id TEXT PRIMARY KEY,
@@ -174,7 +178,7 @@ async def db_init() -> None:
                 kind TEXT,
                 amount_int INT,
                 currency TEXT DEFAULT 'UAH',
-                stock_id BIGINT,
+                stock_id BIGINT REFERENCES stock(id),
                 provider TEXT,
                 status TEXT DEFAULT 'wait',
                 expires_at TIMESTAMPTZ,
@@ -347,7 +351,7 @@ async def paysync_create(amount: int, data: str) -> dict:
             try:
                 return json.loads(raw_text)
             except Exception:
-                raise RuntimeError(f"PaySync JSON: {raw_text[:300]}")
+                raise RuntimeError(f"PaySync JSON error: {raw_text[:300]}")
 
 
 async def paysync_check(trade_id: str) -> dict:
@@ -364,10 +368,13 @@ async def paysync_check(trade_id: str) -> dict:
             try:
                 return json.loads(raw_text)
             except Exception:
-                raise RuntimeError(f"PaySync JSON: {raw_text[:300]}")
+                raise RuntimeError(f"PaySync JSON error: {raw_text[:300]}")
 
 
 async def crypto_pay_create(amount: int, currency: str = "USDT") -> dict:
+    if not CRYPTO_PAY_API_TOKEN:
+        raise RuntimeError("CRYPTO_PAY_API_TOKEN не установлен")
+    
     url = f"{CRYPTO_PAY_BASE_URL}/invoices"
     headers = {
         "Crypto-Pay-API-Token": CRYPTO_PAY_API_TOKEN,
@@ -386,18 +393,21 @@ async def crypto_pay_create(amount: int, currency: str = "USDT") -> dict:
             raw_text = await resp.text()
 
             if resp.status >= 400:
-                raise RuntimeError(f"Crypto HTTP {resp.status}: {raw_text[:300]}")
+                raise RuntimeError(f"Crypto Pay HTTP {resp.status}: {raw_text[:300]}")
 
             try:
                 data = json.loads(raw_text)
                 if data.get("ok"):
                     return data.get("result", {})
-                raise RuntimeError(f"Crypto: {data.get('error', 'unknown')}")
-            except Exception as e:
-                raise RuntimeError(f"Crypto: {str(e)[:300]}")
+                raise RuntimeError(f"Crypto Pay: {data.get('error', 'unknown')}")
+            except json.JSONDecodeError:
+                raise RuntimeError(f"Crypto Pay JSON error: {raw_text[:300]}")
 
 
 async def crypto_pay_check(invoice_id: int) -> dict:
+    if not CRYPTO_PAY_API_TOKEN:
+        raise RuntimeError("CRYPTO_PAY_API_TOKEN не установлен")
+    
     url = f"{CRYPTO_PAY_BASE_URL}/invoices?invoice_ids={invoice_id}"
     headers = {"Crypto-Pay-API-Token": CRYPTO_PAY_API_TOKEN}
 
@@ -406,22 +416,22 @@ async def crypto_pay_check(invoice_id: int) -> dict:
             raw_text = await resp.text()
 
             if resp.status >= 400:
-                raise RuntimeError(f"Crypto HTTP {resp.status}")
+                raise RuntimeError(f"Crypto Pay HTTP {resp.status}: {raw_text[:300]}")
 
             try:
                 data = json.loads(raw_text)
                 if data.get("ok"):
                     invoices = data.get("result", {}).get("items", [])
                     return invoices[0] if invoices else {}
-                raise RuntimeError(f"Crypto: {data.get('error')}")
-            except Exception as e:
-                raise RuntimeError(f"Crypto: {str(e)}")
+                raise RuntimeError(f"Crypto Pay: {data.get('error', 'unknown')}")
+            except json.JSONDecodeError:
+                raise RuntimeError(f"Crypto Pay JSON error: {raw_text[:300]}")
 
 
 def extract_trade_id(js: dict) -> str:
     trade_id = js.get("trade")
     if trade_id is None:
-        raise RuntimeError("No trade ID")
+        raise RuntimeError("PaySync: no trade field")
     return str(trade_id)
 
 
@@ -438,10 +448,10 @@ def extract_amount(js: dict, fallback: int) -> int:
     raw = js.get("amount", fallback)
     try:
         return int(raw)
-    except:
+    except Exception:
         try:
             return int(decimal.Decimal(str(raw)))
-        except:
+        except Exception:
             return fallback
 
 
@@ -684,8 +694,8 @@ async def cb_pay_balance(call: CallbackQuery):
                 )
 
                 await con.execute(
-                    "INSERT INTO purchases(user_id, product_name, district, city, price, photo_id, provider) VALUES($1,$2,$3,$4,$5,$6,$7)",
-                    uid, item["product_name"], item["district"], item["city"], price, item["photo_id"], "balance"
+                    "INSERT INTO purchases(user_id, stock_id, product_name, district, city, price, photo_id, provider) VALUES($1,$2,$3,$4,$5,$6,$7,$8)",
+                    uid, stock_id, item["product_name"], item["district"], item["city"], price, item["photo_id"], "balance"
                 )
 
         text = f"✅ Покупка успешна\n\n{item['product_name']}\n📍 {item['district']}\n💰 {price:.0f} {UAH}"
@@ -714,7 +724,7 @@ async def cb_pay_card(call: CallbackQuery):
 
         async with pool.acquire() as con:
             item = await con.fetchrow(
-                "SELECT * FROM stock WHERE id=$1 FOR UPDATE", stock_id
+                "SELECT * FROM stock WHERE id=$1", stock_id
             )
 
             if not item or item["sold_at"]:
@@ -782,13 +792,19 @@ async def cb_pay_crypto(call: CallbackQuery):
 
         price = int(decimal.Decimal(item["price"]))
         
-        invoice = await crypto_pay_create(price, "USDT")
+        try:
+            invoice = await crypto_pay_create(price, "USDT")
+        except Exception as e:
+            print(f"[CRYPTO CREATE ERROR] {repr(e)}")
+            await call.message.answer(f"Крипто недоступна. Используй другой способ оплаты")
+            return
         
         invoice_id = invoice.get("invoice_id")
         pay_url = invoice.get("pay_url")
 
         if not invoice_id or not pay_url:
-            raise RuntimeError("Нет данных инвойса")
+            await call.message.answer("Ошибка создания платежа")
+            return
 
         expires_at = get_ukraine_time() + timedelta(minutes=PAYMENT_TIMEOUT_MINUTES)
 
@@ -839,15 +855,20 @@ async def cb_check(call: CallbackQuery):
             return
 
         if inv["status"] == "paid":
-            await call.message.answer("Счет обработан")
+            await call.message.answer("Счет уже обработан")
             return
 
         if inv["provider"] == "paysync":
             js = await paysync_check(trade_id)
             status = extract_status(js)
         elif inv["provider"] == "crypto":
-            js = await crypto_pay_check(int(trade_id))
-            status = js.get("status", "").lower()
+            try:
+                js = await crypto_pay_check(int(trade_id))
+                status = js.get("status", "").lower()
+            except Exception as e:
+                print(f"[CRYPTO CHECK ERROR] {repr(e)}")
+                await call.message.answer("Не могу проверить статус крипто платежа")
+                return
         else:
             await call.message.answer("Неизвестный провайдер")
             return
@@ -879,7 +900,7 @@ async def cb_check(call: CallbackQuery):
                         )
                         return
 
-                    if inv["kind"] == "purchase" and inv["stock_id"]:
+                    if inv["kind"] == "purchase":
                         item = await con.fetchrow(
                             "SELECT * FROM stock WHERE id=$1 FOR UPDATE",
                             inv["stock_id"]
@@ -908,8 +929,8 @@ async def cb_check(call: CallbackQuery):
                         )
 
                         await con.execute(
-                            "INSERT INTO purchases(user_id, product_name, district, city, price, photo_id, provider) VALUES($1,$2,$3,$4,$5,$6,$7)",
-                            inv["user_id"], item["product_name"], item["district"], item["city"], item["price"], item["photo_id"], inv["provider"]
+                            "INSERT INTO purchases(user_id, stock_id, product_name, district, city, price, photo_id, provider) VALUES($1,$2,$3,$4,$5,$6,$7,$8)",
+                            inv["user_id"], inv["stock_id"], item["product_name"], item["district"], item["city"], item["price"], item["photo_id"], inv["provider"]
                         )
 
                         await con.execute(
@@ -969,7 +990,7 @@ async def cb_history(call: CallbackQuery):
     for r in rows:
         dt = format_ukraine_time(r["created_at"])
         price = decimal.Decimal(r["price"])
-        text += f"• {r['product_name']} ({r['city']})\n  📍 {r['district']} — {price:.0f} {UAH}\n  {dt}\n\n"
+        text += f"• {r['product_name']} ({r['city']}) — 📍 {r['district']}\n  {price:.0f} {UAH} ({dt})\n\n"
 
     await call.message.answer(text)
 
@@ -1050,12 +1071,11 @@ async def cmd_add_stock(message: Message, state: FSMContext):
         raw = message.text.replace("/addstock", "", 1).strip()
         parts = [p.strip() for p in raw.split("|")]
 
-        if len(parts) < 4:
+        if len(parts) < 5:
             await message.answer("Формат: /addstock город | товар | район | цена | описание")
             return
 
-        city, product, district, price_raw = parts[0], parts[1], parts[2], parts[3]
-        desc = parts[4] if len(parts) > 4 else ""
+        city, product, district, price_raw, desc = parts[0], parts[1], parts[2], parts[3], parts[4]
 
         if city not in ["odesa", "lviv"]:
             await message.answer("Город: odesa или lviv")
