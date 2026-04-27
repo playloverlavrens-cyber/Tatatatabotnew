@@ -171,8 +171,6 @@ async def db_init() -> None:
                 product_code TEXT,
                 provider TEXT,
                 status TEXT DEFAULT 'wait',
-                card_number TEXT,
-                raw_response TEXT,
                 expires_at TIMESTAMPTZ,
                 paid_at TIMESTAMPTZ,
                 created_at TIMESTAMPTZ DEFAULT NOW()
@@ -309,7 +307,7 @@ async def paysync_create(amount: int, data: str) -> dict:
             try:
                 return json.loads(raw_text)
             except Exception as e:
-                raise RuntimeError(f"PaySync вернул не JSON: {raw_text[:300]} | parse error: {e}")
+                raise RuntimeError(f"PaySync вернул не JSON: {raw_text[:300]}")
 
 
 async def paysync_check(trade_id: str) -> dict:
@@ -327,7 +325,7 @@ async def paysync_check(trade_id: str) -> dict:
             try:
                 return json.loads(raw_text)
             except Exception as e:
-                raise RuntimeError(f"PaySync check вернул не JSON: {raw_text[:300]} | parse error: {e}")
+                raise RuntimeError(f"PaySync check вернул не JSON: {raw_text[:300]}")
 
 
 def extract_trade_id(js: dict) -> str:
@@ -340,7 +338,7 @@ def extract_trade_id(js: dict) -> str:
 def extract_card_number(js: dict) -> str:
     card = js.get("card_number")
     if not card:
-        return ""
+        return "не получена"
     return str(card).strip()
 
 
@@ -500,10 +498,9 @@ async def topup_amount(message: Message, state: FSMContext):
         async with pool.acquire() as con:
             await con.execute("""
                 INSERT INTO invoices(
-                    trade_id, user_id, kind, amount_int, currency, provider, status,
-                    card_number, raw_response, expires_at
+                    trade_id, user_id, kind, amount_int, currency, product_code, provider, status, expires_at
                 )
-                VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+                VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)
                 ON CONFLICT (trade_id) DO NOTHING
             """,
                 trade_id,
@@ -511,17 +508,16 @@ async def topup_amount(message: Message, state: FSMContext):
                 "topup",
                 real_amount,
                 PAYSYNC_CURRENCY,
+                None,
                 "paysync",
                 "wait",
-                card_number,
-                json.dumps(js, ensure_ascii=False),
                 expires_at
             )
 
         text = (
             "💳 Пополнение через PaySync\n\n"
             f"🧾 Заявка: {trade_id}\n"
-            f"💳 Карта для оплаты:\n{card_number if card_number else '— карта не выдана'}\n"
+            f"💳 Карта для оплаты:\n{card_number}\n"
             f"💰 Сумма: {real_amount} {PAYSYNC_CURRENCY}\n"
             f"⏳ Срок оплаты: до {paysync_time if paysync_time else dt_to_text(expires_at)}\n\n"
             "❗️ Оплачивай одним платежом и точно в указанной сумме.\n"
@@ -531,7 +527,7 @@ async def topup_amount(message: Message, state: FSMContext):
 
     except Exception as e:
         print(f"[TOPUP ERROR] {repr(e)}")
-        await message.answer(f"❌ Не удалось создать платёж.\n\n{str(e)[:500]}")
+        await message.answer(f"❌ Не удалось создать платёж.\n\n{str(e)[:300]}")
     finally:
         await state.clear()
 
@@ -609,7 +605,7 @@ async def cb_pay_balance(call: CallbackQuery):
 
     except Exception as e:
         print(f"[PAY BALANCE ERROR] {repr(e)}")
-        await call.message.answer(f"❌ Ошибка при покупке.\n\n{str(e)[:500]}")
+        await call.message.answer(f"❌ Ошибка при покупке.\n\n{str(e)[:300]}")
 
 
 @dp.callback_query(F.data.startswith("pay:card:"))
@@ -667,10 +663,9 @@ async def cb_pay_card(call: CallbackQuery):
         async with pool.acquire() as con:
             await con.execute("""
                 INSERT INTO invoices(
-                    trade_id, user_id, kind, amount_int, currency, product_code, provider,
-                    status, card_number, raw_response, expires_at
+                    trade_id, user_id, kind, amount_int, currency, product_code, provider, status, expires_at
                 )
-                VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+                VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)
                 ON CONFLICT (trade_id) DO NOTHING
             """,
                 trade_id,
@@ -681,8 +676,6 @@ async def cb_pay_card(call: CallbackQuery):
                 code,
                 "paysync",
                 "wait",
-                card_number,
-                json.dumps(js, ensure_ascii=False),
                 expires_at
             )
 
@@ -690,10 +683,10 @@ async def cb_pay_card(call: CallbackQuery):
             "💳 Оплата через PaySync\n\n"
             f"📦 Товар: {product_name}\n"
             f"🧾 Заявка: {trade_id}\n"
-            f"💳 Карта для оплаты:\n{card_number if card_number else '— карта не выдана'}\n"
+            f"💳 Карта для оплаты:\n{card_number}\n"
             f"💰 Сумма: {real_amount} {PAYSYNC_CURRENCY}\n"
             f"⏳ Срок оплаты: до {paysync_time if paysync_time else dt_to_text(expires_at)}\n\n"
-            "Товар зарезервирован за вами на время оплаты.\n"
+            f"⏱ Товар зарезервирован за вами на {RESERVATION_MINUTES} минут.\n"
             "❗️ Оплачивай одним платежом и точно в указанной сумме.\n"
             "После оплаты нажми кнопку проверки ниже."
         )
@@ -709,7 +702,7 @@ async def cb_pay_card(call: CallbackQuery):
                 """, code, uid)
 
         print(f"[CARD ERROR] {repr(e)}")
-        await call.message.answer(f"❌ Не удалось создать заявку на оплату.\n\n{str(e)[:500]}")
+        await call.message.answer(f"❌ Не удалось создать заявку на оплату.\n\n{str(e)[:300]}")
 
 
 @dp.callback_query(F.data.startswith("pay:crypto:"))
@@ -767,9 +760,9 @@ async def cb_check(call: CallbackQuery):
 
                         await con.execute("""
                             UPDATE invoices
-                            SET status='paid', paid_at=NOW(), raw_response=$2
+                            SET status='paid', paid_at=NOW()
                             WHERE trade_id=$1
-                        """, trade_id, json.dumps(js, ensure_ascii=False))
+                        """, trade_id)
 
                         await call.message.answer(
                             f"✅ Оплата подтверждена!\n\n"
@@ -792,9 +785,9 @@ async def cb_check(call: CallbackQuery):
                         if product["sold_at"] is not None:
                             await con.execute("""
                                 UPDATE invoices
-                                SET status='paid', paid_at=NOW(), raw_response=$2
+                                SET status='paid', paid_at=NOW()
                                 WHERE trade_id=$1
-                            """, trade_id, json.dumps(js, ensure_ascii=False))
+                            """, trade_id)
 
                             await call.message.answer(
                                 "⚠️ Оплата найдена, но товар уже отмечен как проданный.\n"
@@ -824,9 +817,9 @@ async def cb_check(call: CallbackQuery):
 
                         await con.execute("""
                             UPDATE invoices
-                            SET status='paid', paid_at=NOW(), raw_response=$2
+                            SET status='paid', paid_at=NOW()
                             WHERE trade_id=$1
-                        """, trade_id, json.dumps(js, ensure_ascii=False))
+                        """, trade_id)
 
                         await call.message.answer(
                             "✅ Оплата подтверждена!\n\n"
@@ -856,9 +849,9 @@ async def cb_check(call: CallbackQuery):
 
                     await con.execute("""
                         UPDATE invoices
-                        SET status=$2, raw_response=$3
+                        SET status=$2
                         WHERE trade_id=$1
-                    """, trade_id, status, json.dumps(js, ensure_ascii=False))
+                    """, trade_id, status)
 
             await call.message.answer(f"❌ Платёж завершился со статусом: {status}")
             return
@@ -869,7 +862,7 @@ async def cb_check(call: CallbackQuery):
 
     except Exception as e:
         print(f"[CHECK ERROR] {repr(e)}")
-        await call.message.answer(f"❌ Ошибка проверки оплаты:\n\n{str(e)[:500]}")
+        await call.message.answer(f"❌ Ошибка проверки оплаты:\n\n{str(e)[:300]}")
 
 
 @dp.callback_query(F.data == "profile:history")
@@ -951,7 +944,7 @@ async def cmd_add(message: Message):
         await message.answer(f"✅ Товар добавлен: {code}")
 
     except Exception as e:
-        await message.answer(f"❌ Ошибка: {str(e)[:500]}")
+        await message.answer(f"❌ Ошибка: {str(e)[:300]}")
 
 
 @dp.message(F.text.startswith("/delproduct"))
@@ -972,7 +965,7 @@ async def cmd_del(message: Message):
         await message.answer(f"✅ Товар {code} отключен.")
 
     except Exception as e:
-        await message.answer(f"❌ Ошибка: {str(e)[:500]}")
+        await message.answer(f"❌ Ошибка: {str(e)[:300]}")
 
 
 @dp.message(F.text.startswith("/products"))
@@ -1007,7 +1000,7 @@ async def cmd_products(message: Message):
         await message.answer(text)
 
     except Exception as e:
-        await message.answer(f"❌ Ошибка: {str(e)[:500]}")
+        await message.answer(f"❌ Ошибка: {str(e)[:300]}")
 
 
 async def main():
