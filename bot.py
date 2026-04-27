@@ -131,7 +131,6 @@ async def db_init() -> None:
             )
         """)
 
-        # Таблица товаров по районам
         await con.execute("""
             CREATE TABLE IF NOT EXISTS stock (
                 id BIGSERIAL PRIMARY KEY,
@@ -161,6 +160,12 @@ async def db_init() -> None:
                 created_at TIMESTAMPTZ DEFAULT NOW()
             )
         """)
+
+        # Добавляем колонку если её нет
+        try:
+            await con.execute("ALTER TABLE invoices ADD COLUMN stock_id BIGINT")
+        except:
+            pass
 
         await con.execute("""
             CREATE TABLE IF NOT EXISTS invoices (
@@ -342,7 +347,7 @@ async def paysync_create(amount: int, data: str) -> dict:
             try:
                 return json.loads(raw_text)
             except Exception:
-                raise RuntimeError(f"PaySync JSON error: {raw_text[:300]}")
+                raise RuntimeError(f"PaySync JSON: {raw_text[:300]}")
 
 
 async def paysync_check(trade_id: str) -> dict:
@@ -359,7 +364,7 @@ async def paysync_check(trade_id: str) -> dict:
             try:
                 return json.loads(raw_text)
             except Exception:
-                raise RuntimeError(f"PaySync JSON error: {raw_text[:300]}")
+                raise RuntimeError(f"PaySync JSON: {raw_text[:300]}")
 
 
 async def crypto_pay_create(amount: int, currency: str = "USDT") -> dict:
@@ -381,15 +386,15 @@ async def crypto_pay_create(amount: int, currency: str = "USDT") -> dict:
             raw_text = await resp.text()
 
             if resp.status >= 400:
-                raise RuntimeError(f"Crypto Pay HTTP {resp.status}: {raw_text[:300]}")
+                raise RuntimeError(f"Crypto HTTP {resp.status}: {raw_text[:300]}")
 
             try:
                 data = json.loads(raw_text)
                 if data.get("ok"):
                     return data.get("result", {})
-                raise RuntimeError(f"Crypto Pay: {data.get('error', 'unknown')}")
+                raise RuntimeError(f"Crypto: {data.get('error', 'unknown')}")
             except Exception as e:
-                raise RuntimeError(f"Crypto Pay: {str(e)[:300]}")
+                raise RuntimeError(f"Crypto: {str(e)[:300]}")
 
 
 async def crypto_pay_check(invoice_id: int) -> dict:
@@ -401,22 +406,22 @@ async def crypto_pay_check(invoice_id: int) -> dict:
             raw_text = await resp.text()
 
             if resp.status >= 400:
-                raise RuntimeError(f"Crypto Pay HTTP {resp.status}: {raw_text[:300]}")
+                raise RuntimeError(f"Crypto HTTP {resp.status}")
 
             try:
                 data = json.loads(raw_text)
                 if data.get("ok"):
                     invoices = data.get("result", {}).get("items", [])
                     return invoices[0] if invoices else {}
-                raise RuntimeError(f"Crypto Pay: {data.get('error', 'unknown')}")
+                raise RuntimeError(f"Crypto: {data.get('error')}")
             except Exception as e:
-                raise RuntimeError(f"Crypto Pay: {str(e)[:300]}")
+                raise RuntimeError(f"Crypto: {str(e)}")
 
 
 def extract_trade_id(js: dict) -> str:
     trade_id = js.get("trade")
     if trade_id is None:
-        raise RuntimeError("PaySync: no trade field")
+        raise RuntimeError("No trade ID")
     return str(trade_id)
 
 
@@ -433,10 +438,10 @@ def extract_amount(js: dict, fallback: int) -> int:
     raw = js.get("amount", fallback)
     try:
         return int(raw)
-    except Exception:
+    except:
         try:
             return int(decimal.Decimal(str(raw)))
-        except Exception:
+        except:
             return fallback
 
 
@@ -453,11 +458,6 @@ class PromoStates(StatesGroup):
 
 
 class AddStockStates(StatesGroup):
-    waiting_city = State()
-    waiting_product = State()
-    waiting_district = State()
-    waiting_price = State()
-    waiting_description = State()
     waiting_photo = State()
 
 # ================== BOT ==================
@@ -713,18 +713,17 @@ async def cb_pay_card(call: CallbackQuery):
         assert pool is not None
 
         async with pool.acquire() as con:
-            async with con.transaction():
-                item = await con.fetchrow(
-                    "SELECT * FROM stock WHERE id=$1 FOR UPDATE", stock_id
-                )
+            item = await con.fetchrow(
+                "SELECT * FROM stock WHERE id=$1 FOR UPDATE", stock_id
+            )
 
-                if not item or item["sold_at"]:
-                    await call.message.answer("Товар недоступен")
-                    return
+            if not item or item["sold_at"]:
+                await call.message.answer("Товар недоступен")
+                return
 
-                price = int(decimal.Decimal(item["price"]))
-                nonce = uuid.uuid4().hex[:12]
-                payload = f"buy:{uid}:{stock_id}:{nonce}"
+            price = int(decimal.Decimal(item["price"]))
+            nonce = uuid.uuid4().hex[:12]
+            payload = f"buy:{uid}:{stock_id}:{nonce}"
 
         js = await paysync_create(price, payload)
 
@@ -777,8 +776,8 @@ async def cb_pay_crypto(call: CallbackQuery):
                 "SELECT * FROM stock WHERE id=$1", stock_id
             )
 
-        if not item:
-            await call.message.answer("Товар не найден")
+        if not item or item["sold_at"]:
+            await call.message.answer("Товар недоступен")
             return
 
         price = int(decimal.Decimal(item["price"]))
@@ -840,7 +839,7 @@ async def cb_check(call: CallbackQuery):
             return
 
         if inv["status"] == "paid":
-            await call.message.answer("Счет уже обработан")
+            await call.message.answer("Счет обработан")
             return
 
         if inv["provider"] == "paysync":
@@ -880,7 +879,7 @@ async def cb_check(call: CallbackQuery):
                         )
                         return
 
-                    if inv["kind"] == "purchase":
+                    if inv["kind"] == "purchase" and inv["stock_id"]:
                         item = await con.fetchrow(
                             "SELECT * FROM stock WHERE id=$1 FOR UPDATE",
                             inv["stock_id"]
@@ -970,7 +969,7 @@ async def cb_history(call: CallbackQuery):
     for r in rows:
         dt = format_ukraine_time(r["created_at"])
         price = decimal.Decimal(r["price"])
-        text += f"• {r['product_name']} ({r['city']}) — 📍 {r['district']}\n  {price:.0f} {UAH} ({dt})\n\n"
+        text += f"• {r['product_name']} ({r['city']})\n  📍 {r['district']} — {price:.0f} {UAH}\n  {dt}\n\n"
 
     await call.message.answer(text)
 
@@ -1051,11 +1050,12 @@ async def cmd_add_stock(message: Message, state: FSMContext):
         raw = message.text.replace("/addstock", "", 1).strip()
         parts = [p.strip() for p in raw.split("|")]
 
-        if len(parts) < 5:
+        if len(parts) < 4:
             await message.answer("Формат: /addstock город | товар | район | цена | описание")
             return
 
-        city, product, district, price_raw, desc = parts[0], parts[1], parts[2], parts[3], parts[4] if len(parts) > 4 else ""
+        city, product, district, price_raw = parts[0], parts[1], parts[2], parts[3]
+        desc = parts[4] if len(parts) > 4 else ""
 
         if city not in ["odesa", "lviv"]:
             await message.answer("Город: odesa или lviv")
