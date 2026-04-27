@@ -64,7 +64,7 @@ UAH = "₴"
 UKRAINE_TZ = ZoneInfo("Europe/Kyiv")
 
 # ================== TEXTS ==================
-MAIN_TEXT = """🍝 Добро пожаловать в "Итальянский Квадрат"
+MAIN_CAPTION = """🍝 Добро пожаловать в "Итальянский Квадрат"
 
 ⭐ Наши преимущества:
 • Все товары топ качества
@@ -147,6 +147,12 @@ async def db_init() -> None:
                 created_at TIMESTAMPTZ DEFAULT NOW()
             )
         """)
+
+        # Добавляем колонку если её нет
+        try:
+            await con.execute("ALTER TABLE products ADD COLUMN photo_id TEXT")
+        except:
+            pass
 
         await con.execute("""
             CREATE TABLE IF NOT EXISTS purchases (
@@ -452,7 +458,6 @@ class PromoStates(StatesGroup):
 
 
 class SetPhotoStates(StatesGroup):
-    waiting_code = State()
     waiting_photo = State()
 
 # ================== BOT ==================
@@ -463,16 +468,30 @@ dp = Dispatcher(storage=MemoryStorage())
 async def cmd_start(message: Message):
     await ensure_user(message.from_user.id)
     bal, orders = await get_stats(message.from_user.id)
-    text = MAIN_TEXT.format(balance=f"{bal:.2f}", orders=orders, uah=UAH)
-    await message.answer(text, reply_markup=bottom_menu())
+    caption = MAIN_CAPTION.format(balance=f"{bal:.2f}", orders=orders, uah=UAH)
+    try:
+        await message.answer_photo(
+            photo="https://i.postimg.cc/0jQVyKJX/italian-square.jpg",
+            caption=caption,
+            reply_markup=bottom_menu()
+        )
+    except:
+        await message.answer(caption, reply_markup=bottom_menu())
 
 
 @dp.message(F.text.contains("ГЛАВНАЯ"))
 async def btn_main(message: Message):
     await ensure_user(message.from_user.id)
     bal, orders = await get_stats(message.from_user.id)
-    text = MAIN_TEXT.format(balance=f"{bal:.2f}", orders=orders, uah=UAH)
-    await message.answer(text, reply_markup=inline_city())
+    caption = MAIN_CAPTION.format(balance=f"{bal:.2f}", orders=orders, uah=UAH)
+    try:
+        await message.answer_photo(
+            photo="https://i.postimg.cc/0jQVyKJX/italian-square.jpg",
+            caption=caption,
+            reply_markup=inline_city()
+        )
+    except:
+        await message.answer(caption, reply_markup=inline_city())
 
 
 @dp.message(F.text.contains("ПРОФИЛЬ"))
@@ -533,7 +552,7 @@ async def cb_product(call: CallbackQuery):
         """, code, city)
 
     if not row:
-        await call.message.answer("��овар не найден")
+        await call.message.answer("Товар не найден")
         return
 
     if row["sold_at"] is not None:
@@ -771,7 +790,6 @@ async def cb_pay_crypto(call: CallbackQuery):
 
         price = int(decimal.Decimal(product["price"]))
         
-        # Создаём инвойс через Crypto Pay
         invoice = await crypto_pay_create(price, "USDT")
         
         invoice_id = invoice.get("invoice_id")
@@ -832,7 +850,6 @@ async def cb_check(call: CallbackQuery):
             await call.message.answer("Этот счет уже был обработан")
             return
 
-        # Проверяем статус в зависимости от провайдера
         if inv["provider"] == "paysync":
             js = await paysync_check(trade_id)
             status = extract_status(js)
@@ -885,7 +902,7 @@ async def cb_check(call: CallbackQuery):
                                 "UPDATE invoices SET status='paid', paid_at=NOW() WHERE trade_id=$1",
                                 trade_id
                             )
-                            await call.message.answer("⚠️ Товар уже продан. Свяжись с оператором")
+                            await call.message.answer("Товар уже продан. Свяжись с оператором")
                             return
 
                         await con.execute(
