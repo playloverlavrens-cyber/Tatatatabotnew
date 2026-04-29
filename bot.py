@@ -587,7 +587,7 @@ async def cb_pay_balance(call: CallbackQuery):
 
                 await con.execute("""
                     UPDATE products
-                    SET sold_to=$2, sold_at=NOW(), reserved_by=NULL, reserved_until=NULL, is_active=FALSE
+                    SET sold_to=$2, sold_at=NOW(), reserved_by=NULL, reserved_until=NULL
                     WHERE code=$1
                 """, code, uid)
 
@@ -800,8 +800,7 @@ async def cb_check(call: CallbackQuery):
                             SET sold_to=$2,
                                 sold_at=NOW(),
                                 reserved_by=NULL,
-                                reserved_until=NULL,
-                                is_active=FALSE
+                                reserved_until=NULL
                             WHERE code=$1
                         """, inv["product_code"], inv["user_id"])
 
@@ -863,7 +862,7 @@ async def cb_check(call: CallbackQuery):
 
     except Exception as e:
         print(f"[CHECK ERROR] {repr(e)}")
-        await call.message.answer(f"❌ Ошибка ��роверки оплаты:\n\n{str(e)[:300]}")
+        await call.message.answer(f"❌ Ошибка проверки оплаты:\n\n{str(e)[:300]}")
 
 
 @dp.callback_query(F.data == "profile:history")
@@ -926,15 +925,20 @@ async def cmd_add(message: Message):
 
         assert pool is not None
         async with pool.acquire() as con:
-            existing = await con.fetchval("SELECT 1 FROM products WHERE code=$1", code)
-            
-            if existing:
-                await message.answer(f"❌ Товар с кодом {code} уже существует! Удали старый /delproduct {code}")
-                return
-
             await con.execute("""
                 INSERT INTO products(code, city, name, price, link, description, is_active)
                 VALUES($1,$2,$3,$4,$5,$6,TRUE)
+                ON CONFLICT(code) DO UPDATE SET
+                    city=EXCLUDED.city,
+                    name=EXCLUDED.name,
+                    price=EXCLUDED.price,
+                    link=EXCLUDED.link,
+                    description=EXCLUDED.description,
+                    is_active=TRUE,
+                    sold_to=NULL,
+                    sold_at=NULL,
+                    reserved_by=NULL,
+                    reserved_until=NULL
             """, code, city, name, price, link, desc)
 
         await message.answer(f"✅ Товар добавлен: {code}")
@@ -956,9 +960,9 @@ async def cmd_del(message: Message):
 
         assert pool is not None
         async with pool.acquire() as con:
-            await con.execute("DELETE FROM products WHERE code=$1", code)
+            await con.execute("UPDATE products SET is_active=FALSE WHERE code=$1", code)
 
-        await message.answer(f"✅ Товар {code} удален.")
+        await message.answer(f"✅ Товар {code} отключен.")
 
     except Exception as e:
         await message.answer(f"❌ Ошибка: {str(e)[:300]}")
@@ -973,7 +977,7 @@ async def cmd_products(message: Message):
         assert pool is not None
         async with pool.acquire() as con:
             rows = await con.fetch("""
-                SELECT city, code, name, price, is_active, reserved_until, sold_at, sold_to
+                SELECT city, code, name, price, is_active, reserved_until, sold_at
                 FROM products
                 ORDER BY created_at DESC
                 LIMIT 50
@@ -985,13 +989,13 @@ async def cmd_products(message: Message):
 
         text = "Товары:\n\n"
         for r in rows:
-            state = "🟢 ДОСТУПЕН" if r["is_active"] else "🔴 ОТКЛЮЧЕН"
+            state = "ON" if r["is_active"] else "OFF"
             if r["sold_at"] is not None:
-                state = f"✅ ПРОДАН (пользователь: {r['sold_to']})"
+                state = "SOLD"
             elif r["reserved_until"] is not None and r["reserved_until"] > utc_now():
-                state = f"⏰ ЗАРЕЗЕРВИРОВАН до {dt_to_text(r['reserved_until'])}"
+                state = f"RESERVED до {dt_to_text(r['reserved_until'])}"
 
-            text += f"{r['city']} | {r['code']} | {r['name']} | {decimal.Decimal(r['price']):.2f} {UAH}\n{state}\n\n"
+            text += f"{r['city']} | {r['code']} | {r['name']} | {decimal.Decimal(r['price']):.2f} {UAH} | {state}\n"
 
         await message.answer(text)
 
