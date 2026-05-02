@@ -7,7 +7,6 @@ import aiohttp
 import uuid
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
-from urllib.parse import quote
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart
@@ -51,23 +50,18 @@ CLIENT_ID = int(PAYSYNC_CLIENT_ID_RAW)
 UAH = "₴"
 UKRAINE_TZ = ZoneInfo("Europe/Kyiv")
 
-# ================== CONST ==================
-MAIN_PHOTO_URL = "https://postimg.cc/VJW1MWxQ/7f592b2b"
-PRODUCT_PHOTO_URL = "https://postimg.cc/w1gY6s1d/a98e25ac"
-
 CITIES = {
     "odesa": {"emoji": "🌊", "name": "Одесса"},
     "kyiv": {"emoji": "🏛️", "name": "Київ"},
     "poltava": {"emoji": "🌳", "name": "Полтава"}
 }
 
-MAIN_TEXT = """🏢 TrustCity — Надійний магазин онлайн
+MAIN_TEXT = """🏢 TrustCity — Надійний магазин
 
-⭐ Наші переваги:
-• Верифіковані товари преміум якості
-• Швидке оновлення каталогу
+⭐ Наші преваги:
+• Верифіковані товари
+• Швидке оновлення
 • Безпечні методи оплати
-• Відслідковується кожна продаж
 • 24/7 піддтримка
 
 📞 Зв'язок:
@@ -80,38 +74,33 @@ MAIN_TEXT = """🏢 TrustCity — Надійний магазин онлайн
 PROFILE_TEXT = """👤 ПРОФІЛЬ
 
 🏦 Баланс: {balance} {uah}
-📦 Кількість покупок: {orders}
-
-Управління профілем та платежами"""
+📦 Покупок: {orders}"""
 
 RULES_TEXT = """📋 ПРАВИЛА ТА УМОВИ
 
-1️⃣ ПОРЯДОК РОБОТИ
+1️⃣ ПОРЯДОК
 • Вибір товару → Вибір району → Оплата
 • Товар резервується на час оплати
-• Після підтвердження платежу товар переходить у вас
+• Після платежу товар у вас
 
 2️⃣ ОПЛАТА
-• PaySync — прямий переведення на карту
-• Баланс — деньги з вашого рахунку
-• Строк оплати: 15 хвилин з моменту створення заявки
+• PaySync — карта
+• Баланс — ваш рахунок
+• Строк: 15 хвилин
 
 3️⃣ ДОСТАВКА
 • Кожна позиція має фото
-• Данні про район вказані в описі
-• Підтвердження: ID pokупця + дата/час в базі даних
+• Район вказаний в описі
 
 4️⃣ КОНФІДЕНЦІЙНІСТЬ
-• Ваш користувач і покупки лишаються секретом
-• Немає розголошення даних третім особам
-• Всі операції фіксуються в нашій базі
+• Ваш профіль секретно
+• Всі операції зберігаються
 
 5️⃣ ГАРАНТІЇ
-• Прозорість всіх операцій
-• Можливість виводу коштів з балансу
+• Прозорість операцій
 • Технічна підтримка: @TrustCitySupport"""
 
-HELP_TEXT = "Питання? Напиши оператору: @TrustCitySupport"
+HELP_TEXT = "Питання? Напиши: @TrustCitySupport"
 
 # ================== DB ==================
 pool: asyncpg.Pool | None = None
@@ -166,7 +155,7 @@ async def db_init() -> None:
                 id BIGSERIAL PRIMARY KEY,
                 city TEXT NOT NULL,
                 product_name TEXT NOT NULL,
-                districts JSONB NOT NULL,
+                districts TEXT NOT NULL,
                 price NUMERIC(12,2) NOT NULL,
                 photo_id TEXT NOT NULL,
                 description TEXT DEFAULT '',
@@ -210,10 +199,12 @@ async def db_init() -> None:
 async def ensure_user(uid: int, username: str = "") -> None:
     assert pool is not None
     async with pool.acquire() as con:
-        await con.execute(
-            "INSERT INTO users(user_id, username) VALUES($1, $2) ON CONFLICT(user_id) DO UPDATE SET username=COALESCE($2, username)",
-            uid, username
-        )
+        existing = await con.fetchval("SELECT 1 FROM users WHERE user_id=$1", uid)
+        if not existing:
+            await con.execute(
+                "INSERT INTO users(user_id, username) VALUES($1, $2)",
+                uid, username
+            )
 
 
 async def get_stats(uid: int) -> tuple[decimal.Decimal, int]:
@@ -271,48 +262,11 @@ def inline_cities() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
 
-def inline_product(city: str, product_name: str, photo_id: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="🛒 Купити", callback_data=f"buy:{city}:{product_name}")],
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="back:cities")]
-        ]
-    )
-
-
-def inline_districts(city: str, product_name: str, districts_list: list) -> InlineKeyboardMarkup:
-    if not districts_list:
-        return InlineKeyboardMarkup(
-            inline_keyboard=[[InlineKeyboardButton(text="❌ Нема в наявності", callback_data="noop")]]
-        )
-
-    kb = []
-    for district in districts_list:
-        kb.append([
-            InlineKeyboardButton(
-                text=f"📍 {district}",
-                callback_data=f"select_district:{city}:{product_name}:{district}"
-            )
-        ])
-    kb.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="back:cities")])
-    return InlineKeyboardMarkup(inline_keyboard=kb)
-
-
-def inline_pay(stock_id: int, district: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="💳 PaySync", callback_data=f"pay:card:{stock_id}:{district}")],
-            [InlineKeyboardButton(text="💰 Баланс", callback_data=f"pay:bal:{stock_id}:{district}")],
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="back:product")]
-        ]
-    )
-
-
 def inline_profile() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="💳 Поповнити баланс", callback_data="profile:topup")],
-            [InlineKeyboardButton(text="📊 Історія покупок", callback_data="profile:history")]
+            [InlineKeyboardButton(text="💳 Пополнити баланс", callback_data="profile:topup")],
+            [InlineKeyboardButton(text="📊 Історія", callback_data="profile:history")]
         ]
     )
 
@@ -393,15 +347,7 @@ async def cmd_start(message: Message):
     bal, orders = await get_stats(message.from_user.id)
     
     text = MAIN_TEXT.format(balance=f"{bal:.2f}", orders=orders, uah=UAH)
-    
-    try:
-        await message.answer_photo(
-            photo=MAIN_PHOTO_URL,
-            caption=text,
-            reply_markup=bottom_menu()
-        )
-    except:
-        await message.answer(text, reply_markup=bottom_menu())
+    await message.answer(text, reply_markup=bottom_menu())
 
 
 @dp.message(F.text.contains("🏠 ГОЛОВНА"))
@@ -411,15 +357,7 @@ async def btn_main(message: Message):
     bal, orders = await get_stats(message.from_user.id)
     
     text = MAIN_TEXT.format(balance=f"{bal:.2f}", orders=orders, uah=UAH)
-    
-    try:
-        await message.answer_photo(
-            photo=MAIN_PHOTO_URL,
-            caption=text,
-            reply_markup=inline_cities()
-        )
-    except:
-        await message.answer(text, reply_markup=inline_cities())
+    await message.answer(text, reply_markup=inline_cities())
 
 
 @dp.message(F.text.contains("👤 ПРОФІЛЬ"))
@@ -455,7 +393,7 @@ async def cb_city(call: CallbackQuery):
 
     async with pool.acquire() as con:
         rows = await con.fetch("""
-            SELECT DISTINCT product_name, photo_id, price, description
+            SELECT DISTINCT product_name, price, photo_id, description
             FROM stock
             WHERE city=$1 AND is_active=TRUE
             ORDER BY product_name
@@ -476,7 +414,7 @@ async def cb_city(call: CallbackQuery):
                 callback_data=f"prod:{city}:{r['product_name']}"
             )
         ])
-    kb.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="back:cities")])
+    kb.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="back:main")])
     
     await call.message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
 
@@ -499,13 +437,14 @@ async def cb_product(call: CallbackQuery):
         await call.message.answer("❌ Товар недоступний")
         return
 
-    districts_list = json.loads(row['districts']) if isinstance(row['districts'], str) else row['districts']
+    districts_list = row['districts'].split(",") if isinstance(row['districts'], str) else row['districts']
+    districts_list = [d.strip() for d in districts_list]
 
     text = f"""📦 {product}
 
 💰 Ціна: {decimal.Decimal(row['price']):.0f} {UAH}
 
-📝 Опис: {row['description'] or 'Немає описання'}
+📝 Опис: {row['description'] or 'Немає'}
 
 🏙️ Вибери район:"""
 
@@ -517,16 +456,9 @@ async def cb_product(call: CallbackQuery):
                 callback_data=f"district:{city}:{product}:{district}"
             )
         ])
-    kb.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="back:cities")])
+    kb.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="back:main")])
 
-    try:
-        await call.message.answer_photo(
-            photo=row['photo_id'],
-            caption=text,
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=kb)
-        )
-    except:
-        await call.message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+    await call.message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
 
 
 @dp.callback_query(F.data.startswith("district:"))
@@ -561,17 +493,10 @@ async def cb_district(call: CallbackQuery):
     kb = [
         [InlineKeyboardButton(text="💳 PaySync", callback_data=f"pay:card:{stock_id}:{district}")],
         [InlineKeyboardButton(text="💰 Баланс", callback_data=f"pay:bal:{stock_id}:{district}")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="back:cities")]
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="back:main")]
     ]
 
-    try:
-        await call.message.answer_photo(
-            photo=row['photo_id'],
-            caption=text,
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=kb)
-        )
-    except:
-        await call.message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+    await call.message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
 
 
 @dp.callback_query(F.data.startswith("pay:bal:"))
@@ -605,9 +530,7 @@ async def cb_pay_balance(call: CallbackQuery):
 
                 if balance < price:
                     await call.message.answer(
-                        f"❌ Недостатньо коштів\n\n"
-                        f"Потрібно: {price:.0f} {UAH}\n"
-                        f"На рахунку: {balance:.0f} {UAH}"
+                        f"❌ Недостатньо коштів\n\nПотрібно: {price:.0f} {UAH}\nНа рахунку: {balance:.0f} {UAH}"
                     )
                     return
 
@@ -617,7 +540,7 @@ async def cb_pay_balance(call: CallbackQuery):
                 )
 
                 current_time = get_ukraine_time()
-                username = call.from_user.username or "user_id_" + str(uid)
+                username = call.from_user.username or "unknown"
 
                 await con.execute("""
                     INSERT INTO sales(user_id, username, stock_id, product_name, city, district, price, payment_method, paid_at)
@@ -636,13 +559,7 @@ async def cb_pay_balance(call: CallbackQuery):
 
 Дякуємо за покупку! 🎉"""
 
-        try:
-            await call.message.answer_photo(
-                photo=item["photo_id"],
-                caption=text
-            )
-        except:
-            await call.message.answer(text)
+        await call.message.answer(text)
 
     except Exception as e:
         print(f"[PAY BALANCE ERROR] {repr(e)}")
@@ -662,7 +579,7 @@ async def cb_pay_card(call: CallbackQuery):
 
         async with pool.acquire() as con:
             item = await con.fetchrow(
-                "SELECT * FROM stock WHERE id=$1 FOR UPDATE", stock_id
+                "SELECT * FROM stock WHERE id=$1", stock_id
             )
 
             if not item:
@@ -678,7 +595,6 @@ async def cb_pay_card(call: CallbackQuery):
         trade_id = extract_trade_id(js)
         card_number = extract_card_number(js)
         real_amount = extract_amount(js, price)
-        paysync_time = extract_paysync_time(js) if "time" in js else ""
         expires_at = get_ukraine_time() + timedelta(minutes=PAYMENT_TIMEOUT_MINUTES)
 
         async with pool.acquire() as con:
@@ -710,17 +626,10 @@ async def cb_pay_card(call: CallbackQuery):
         
         kb = [
             [InlineKeyboardButton(text="✅ Перевірити оплату", callback_data=f"check:{trade_id}")],
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="back:cities")]
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="back:main")]
         ]
 
-        try:
-            await call.message.answer_photo(
-                photo=item["photo_id"],
-                caption=text,
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=kb)
-            )
-        except:
-            await call.message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+        await call.message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
 
     except Exception as e:
         print(f"[CARD ERROR] {repr(e)}")
@@ -761,16 +670,16 @@ async def cb_check(call: CallbackQuery):
                         return
 
                     item = await con.fetchrow("SELECT * FROM stock WHERE id=$1", inv["stock_id"])
-                    user = await con.fetchrow("SELECT username FROM users WHERE user_id=$1", inv["user_id"])
-
-                    username = user["username"] if user else "unknown"
                     
-                    # Отримай район з попередньої заявки
-                    district_info = await con.fetchval("""
+                    current_time = get_ukraine_time()
+                    username = call.from_user.username or "unknown"
+
+                    # Получить район из последней попытки
+                    sales_row = await con.fetchrow("""
                         SELECT district FROM sales WHERE stock_id=$1 ORDER BY paid_at DESC LIMIT 1
                     """, inv["stock_id"])
-
-                    current_time = get_ukraine_time()
+                    
+                    district = sales_row["district"] if sales_row else "unknown"
 
                     await con.execute("""
                         INSERT INTO sales(user_id, username, stock_id, product_name, city, district, price, payment_method, paid_at)
@@ -778,7 +687,7 @@ async def cb_check(call: CallbackQuery):
                     """,
                         inv["user_id"], username, inv["stock_id"],
                         item["product_name"], item["city"],
-                        district_info or "unknown", inv["amount_int"], "paysync", current_time
+                        district, inv["amount_int"], "paysync", current_time
                     )
 
                     await con.execute(
@@ -799,13 +708,7 @@ async def cb_check(call: CallbackQuery):
 
 Дякуємо за замовлення! 🎉"""
 
-            try:
-                await call.message.answer_photo(
-                    photo=item["photo_id"],
-                    caption=text
-                )
-            except:
-                await call.message.answer(text)
+            await call.message.answer(text)
             return
 
         elif status in {"expired", "cancelled", "canceled", "failed"}:
@@ -852,7 +755,6 @@ async def topup_amount(message: Message, state: FSMContext):
         trade_id = extract_trade_id(js)
         card_number = extract_card_number(js)
         real_amount = extract_amount(js, amount)
-        paysync_time = extract_paysync_time(js) if "time" in js else ""
         expires_at = get_ukraine_time() + timedelta(minutes=PAYMENT_TIMEOUT_MINUTES)
 
         assert pool is not None
@@ -897,10 +799,10 @@ async def cb_history(call: CallbackQuery):
         rows = await con.fetch("""
             SELECT product_name, district, city, price, payment_method, paid_at
             FROM sales
-            WHERE user_id=$1 OR username=$2
+            WHERE user_id=$1
             ORDER BY paid_at DESC
             LIMIT 20
-        """, call.from_user.id, call.from_user.username or "")
+        """, call.from_user.id)
 
     if not rows:
         await call.message.answer("📭 Історія пуста", reply_markup=inline_profile())
@@ -935,7 +837,7 @@ async def cmd_add_stock(message: Message, state: FSMContext):
         parts = [p.strip() for p in raw.split("|")]
 
         if len(parts) < 4:
-            await message.answer("Формат: /addstock город | товар | районы(через,запятую) | цена | описание")
+            await message.answer("Формат: /addstock місто | товар | райони(через,запятую) | ціна | опис")
             return
 
         city = parts[0].lower()
@@ -945,15 +847,15 @@ async def cmd_add_stock(message: Message, state: FSMContext):
         desc = parts[4] if len(parts) > 4 else ""
 
         if city not in CITIES:
-            await message.answer(f"Город: {', '.join(CITIES.keys())}")
+            await message.answer(f"Місто: {', '.join(CITIES.keys())}")
             return
 
         price = decimal.Decimal(price_raw)
-        districts_list = [d.strip() for d in districts_raw.split(",")]
+        districts_str = districts_raw
 
         await state.set_state(AddStockStates.waiting_photo)
         await state.update_data(
-            city=city, product=product, districts=districts_list,
+            city=city, product=product, districts=districts_str,
             price=price, desc=desc
         )
         await message.answer(f"📸 Відправ фото для {product}")
@@ -975,15 +877,14 @@ async def handle_stock_photo(message: Message, state: FSMContext):
                 VALUES($1,$2,$3,$4,$5,$6,TRUE)
             """,
                 data["city"], data["product"],
-                json.dumps(data["districts"]),
+                data["districts"],
                 data["price"], photo_id, data["desc"]
             )
 
-        districts_str = ", ".join(data["districts"])
         await message.answer(
             f"✅ Товар додано\n\n"
             f"{data['product']}\n"
-            f"📍 Райони: {districts_str}\n"
+            f"📍 Райони: {data['districts']}\n"
             f"💰 Ціна: {data['price']:.0f} {UAH}"
         )
 
@@ -1005,22 +906,22 @@ async def cmd_sales(message: Message):
                 SELECT id, user_id, username, product_name, city, district, price, payment_method, paid_at
                 FROM sales
                 ORDER BY paid_at DESC
-                LIMIT 100
+                LIMIT 50
             """)
 
         if not rows:
             await message.answer("📭 Продажів немає")
             return
 
-        text = "💰 ТАБЛИЦЯ ПРОДАЖІВ:\n\n"
+        text = "💰 ТАБЛИЦЯ ПРОДАЖІВ (останні 50):\n\n"
         for r in rows:
             dt = format_ukraine_time(r["paid_at"])
-            text += f"""ID: {r['id']}
-👤 {r['username']} (uid: {r['user_id']})
-📦 {r['product_name']} • {r['city']} • {r['district']}
-💰 {decimal.Decimal(r['price']):.0f} {UAH} • {r['payment_method']}
+            text += f"""ID: {r['id']} | UID: {r['user_id']}
+👤 {r['username']}
+📦 {r['product_name']} ({r['city']} - {r['district']})
+💰 {decimal.Decimal(r['price']):.0f} {UAH} | {r['payment_method']}
 ⏰ {dt}
-━━━━━━━━━━━━━━\n"""
+━━━━━━━━━━━━━━━━━━\n"""
 
         await message.answer(text)
 
