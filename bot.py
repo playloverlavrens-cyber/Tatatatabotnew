@@ -50,57 +50,25 @@ CLIENT_ID = int(PAYSYNC_CLIENT_ID_RAW)
 UAH = "₴"
 UKRAINE_TZ = ZoneInfo("Europe/Kyiv")
 
-CITIES = {
-    "odesa": {"emoji": "🌊", "name": "Одесса"},
-    "kyiv": {"emoji": "🏛️", "name": "Київ"},
-    "poltava": {"emoji": "🌳", "name": "Полтава"}
-}
+MAIN_CAPTION = """🍝 Добро пожаловать в "Итальянский Квадрат"
 
-MAIN_TEXT = """🏢 TrustCity — Надійний магазин
+⭐ Наши преимущества:
+• Все товары топ качества
+• Регулярные пополнения
+• Огромный выбор товара по почте
+• Шустрые отправки
 
-⭐ Наші преваги:
-• Верифіковані товари
-• Швидке оновлення
-• Безпечні методи оплати
-• 24/7 піддтримка
-
-📞 Зв'язок:
-🤖 Бот: @TrustCity1_bot
-👨‍💼 Оператор: @TrustCitySupport
+📞 Контакты:
+Бот: @ititititbot_bot
+Оператор: @italiansquare
 
 🏦 Баланс: {balance} {uah}
-📦 Покупок: {orders}"""
+🛍️ Заказов: {orders}"""
 
-PROFILE_TEXT = """👤 ПРОФІЛЬ
-
-🏦 Баланс: {balance} {uah}
-📦 Покупок: {orders}"""
-
-RULES_TEXT = """📋 ПРАВИЛА ТА УМОВИ
-
-1️⃣ ПОРЯДОК
-• Вибір товару → Вибір району → Оплата
-• Товар резервується на час оплати
-• Після платежу товар у вас
-
-2️⃣ ОПЛАТА
-• PaySync — карта
-• Баланс — ваш рахунок
-• Строк: 15 хвилин
-
-3️⃣ ДОСТАВКА
-• Кожна позиція має фото
-• Район вказаний в описі
-
-4️⃣ КОНФІДЕНЦІЙНІСТЬ
-• Ваш профіль секретно
-• Всі операції зберігаються
-
-5️⃣ ГАРАНТІЇ
-• Прозорість операцій
-• Технічна підтримка: @TrustCitySupport"""
-
-HELP_TEXT = "Питання? Напиши: @TrustCitySupport"
+PROFILE_TEXT = "👤 Профиль\n\n🏦 Баланс: {balance} {uah}\n🛍️ Заказов: {orders}"
+HELP_TEXT = "Вопросы? Обратись: @italiansquare"
+ITEM_TEXT = "✅ Выбран товар: {name}\n💰 Цена: {price} {uah}\n📍 Район: {district}\n\n{desc}"
+TOPUP_TEXT = f"💳 Введи сумму пополнения (мин. 10 {UAH}):"
 
 # ================== DB ==================
 pool: asyncpg.Pool | None = None
@@ -116,7 +84,7 @@ def get_ukraine_time() -> datetime:
 
 def format_ukraine_time(dt: datetime | None) -> str:
     if not dt:
-        return "невідомо"
+        return "неизвестно"
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(UKRAINE_TZ).strftime("%Y-%m-%d %H:%M:%S")
@@ -140,6 +108,7 @@ async def db_init() -> None:
     pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=10)
 
     async with pool.acquire() as con:
+        # Таблица пользователей
         await con.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id BIGINT PRIMARY KEY,
@@ -150,35 +119,43 @@ async def db_init() -> None:
             )
         """)
 
+        # Таблица товаров - ОДИН ТОВАР = ОДНА ПОЗИЦИЯ В РАЙОНЕ
         await con.execute("""
             CREATE TABLE IF NOT EXISTS stock (
                 id BIGSERIAL PRIMARY KEY,
                 city TEXT NOT NULL,
                 product_name TEXT NOT NULL,
-                districts TEXT NOT NULL,
+                district TEXT NOT NULL,
                 price NUMERIC(12,2) NOT NULL,
                 photo_id TEXT NOT NULL,
                 description TEXT DEFAULT '',
+                reserved_by BIGINT,
+                reserved_until TIMESTAMPTZ,
+                sold_to BIGINT,
+                sold_at TIMESTAMPTZ,
                 is_active BOOLEAN DEFAULT TRUE,
                 created_at TIMESTAMPTZ DEFAULT NOW()
             )
         """)
 
+        # Таблица ВСЕХ покупок (история)
         await con.execute("""
-            CREATE TABLE IF NOT EXISTS sales (
+            CREATE TABLE IF NOT EXISTS purchases (
                 id BIGSERIAL PRIMARY KEY,
-                user_id BIGINT REFERENCES users(user_id) ON DELETE SET NULL,
+                user_id BIGINT REFERENCES users(user_id) ON DELETE CASCADE,
                 username TEXT,
-                stock_id BIGINT NOT NULL,
-                product_name TEXT NOT NULL,
-                city TEXT NOT NULL,
-                district TEXT NOT NULL,
-                price NUMERIC(12,2) NOT NULL,
-                payment_method TEXT,
+                stock_id BIGINT,
+                product_name TEXT,
+                district TEXT,
+                city TEXT,
+                price NUMERIC(12,2),
+                photo_id TEXT,
+                provider TEXT,
                 paid_at TIMESTAMPTZ DEFAULT NOW()
             )
         """)
 
+        # Таблица платежей
         await con.execute("""
             CREATE TABLE IF NOT EXISTS invoices (
                 trade_id TEXT PRIMARY KEY,
@@ -195,6 +172,28 @@ async def db_init() -> None:
             )
         """)
 
+        # Таблица промокодов
+        await con.execute("""
+            CREATE TABLE IF NOT EXISTS promo_codes (
+                code TEXT PRIMARY KEY,
+                discount_amount INT,
+                max_uses INT,
+                current_uses INT DEFAULT 0,
+                is_active BOOLEAN DEFAULT TRUE,
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+
+        # Таблица использованных промокодов
+        await con.execute("""
+            CREATE TABLE IF NOT EXISTS promo_usage (
+                id BIGSERIAL PRIMARY KEY,
+                user_id BIGINT,
+                promo_code TEXT REFERENCES promo_codes(code),
+                used_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+
 
 async def ensure_user(uid: int, username: str = "") -> None:
     assert pool is not None
@@ -203,7 +202,7 @@ async def ensure_user(uid: int, username: str = "") -> None:
         if not existing:
             await con.execute(
                 "INSERT INTO users(user_id, username) VALUES($1, $2)",
-                uid, username
+                uid, username or "unknown"
             )
 
 
@@ -220,8 +219,19 @@ async def get_stats(uid: int) -> tuple[decimal.Decimal, int]:
 
 
 async def cleanup_expired() -> None:
+    """Очистка просроченных платежей и резервации"""
     assert pool is not None
     async with pool.acquire() as con:
+        # Удаляем резервацию если время вышло
+        await con.execute("""
+            UPDATE stock
+            SET reserved_by = NULL, reserved_until = NULL
+            WHERE reserved_until IS NOT NULL
+              AND reserved_until < NOW()
+              AND sold_at IS NULL
+        """)
+
+        # Помечаем платежи как истекшие
         await con.execute("""
             UPDATE invoices
             SET status = 'expired'
@@ -232,6 +242,7 @@ async def cleanup_expired() -> None:
 
 
 async def background_cleanup():
+    """Фоновый процесс очистки"""
     while True:
         try:
             await cleanup_expired()
@@ -243,30 +254,76 @@ async def background_cleanup():
 def bottom_menu() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="🏠 ГОЛОВНА"), KeyboardButton(text="👤 ПРОФІЛЬ")],
-            [KeyboardButton(text="💬 ДОПОМОГА"), KeyboardButton(text="📋 ПРАВИЛА ПЗ")]
+            [KeyboardButton(text="🏠 ГЛАВНАЯ"), KeyboardButton(text="👤 ПРОФИЛЬ")],
+            [KeyboardButton(text="💬 ПОМОЩЬ"), KeyboardButton(text="📋 РАБОТА")]
         ],
         resize_keyboard=True
     )
 
 
-def inline_cities() -> InlineKeyboardMarkup:
+def inline_city() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Одесса", callback_data="city:odesa")],
+            [InlineKeyboardButton(text="Львов", callback_data="city:lviv")]
+        ]
+    )
+
+
+def inline_products(rows: list, city: str) -> InlineKeyboardMarkup:
+    if not rows:
+        return InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="Нет товаров", callback_data="noop")]]
+        )
+
+    products = {}
+    for r in rows:
+        if r["product_name"] not in products:
+            products[r["product_name"]] = r["price"]
+
     kb = []
-    for city_key, city_data in CITIES.items():
+    for name, price in products.items():
         kb.append([
             InlineKeyboardButton(
-                text=f"{city_data['emoji']} {city_data['name']}",
-                callback_data=f"city:{city_key}"
+                text=f"{name} — {decimal.Decimal(price):.0f} {UAH}",
+                callback_data=f"prod:{city}:{name}"
             )
         ])
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
 
+def inline_districts(rows: list, city: str, product: str) -> InlineKeyboardMarkup:
+    if not rows:
+        return InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="Нет в наличии", callback_data="noop")]]
+        )
+
+    kb = []
+    for r in rows:
+        kb.append([
+            InlineKeyboardButton(
+                text=f"📍 {r['district']}",
+                callback_data=f"district:{city}:{product}:{r['id']}"
+            )
+        ])
+    return InlineKeyboardMarkup(inline_keyboard=kb)
+
+
+def inline_pay(stock_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="💰 Баланс", callback_data=f"pay:bal:{stock_id}")],
+            [InlineKeyboardButton(text="💳 PaySync", callback_data=f"pay:card:{stock_id}")]
+        ]
+    )
+
+
 def inline_profile() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="💳 Пополнити баланс", callback_data="profile:topup")],
-            [InlineKeyboardButton(text="📊 Історія", callback_data="profile:history")]
+            [InlineKeyboardButton(text="💳 Пополнить", callback_data="profile:topup")],
+            [InlineKeyboardButton(text="🎟 Промокод", callback_data="profile:promo")],
+            [InlineKeyboardButton(text="🧾 История", callback_data="profile:history")]
         ]
     )
 
@@ -274,7 +331,7 @@ def inline_profile() -> InlineKeyboardMarkup:
 def inline_check(trade_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="✅ Перевірити оплату", callback_data=f"check:{trade_id}")]
+            [InlineKeyboardButton(text="Проверить оплату", callback_data=f"check:{trade_id}")]
         ]
     )
 
@@ -286,9 +343,15 @@ async def paysync_create(amount: int, data: str) -> dict:
 
     async with aiohttp.ClientSession() as session:
         async with session.get(url, headers=headers, params=params, timeout=30) as resp:
+            raw_text = await resp.text()
+
             if resp.status >= 400:
-                raise RuntimeError(f"PaySync HTTP {resp.status}")
-            return await resp.json()
+                raise RuntimeError(f"PaySync HTTP {resp.status}: {raw_text[:300]}")
+
+            try:
+                return json.loads(raw_text)
+            except Exception:
+                raise RuntimeError(f"PaySync JSON: {raw_text[:300]}")
 
 
 async def paysync_check(trade_id: str) -> dict:
@@ -297,9 +360,15 @@ async def paysync_check(trade_id: str) -> dict:
 
     async with aiohttp.ClientSession() as session:
         async with session.get(url, headers=headers, timeout=30) as resp:
+            raw_text = await resp.text()
+
             if resp.status >= 400:
-                raise RuntimeError(f"PaySync HTTP {resp.status}")
-            return await resp.json()
+                raise RuntimeError(f"PaySync HTTP {resp.status}: {raw_text[:300]}")
+
+            try:
+                return json.loads(raw_text)
+            except Exception:
+                raise RuntimeError(f"PaySync JSON: {raw_text[:300]}")
 
 
 def extract_trade_id(js: dict) -> str:
@@ -311,7 +380,7 @@ def extract_trade_id(js: dict) -> str:
 
 def extract_card_number(js: dict) -> str:
     card = js.get("card_number")
-    return str(card).strip() if card else "не отримана"
+    return str(card).strip() if card else "не получена"
 
 
 def extract_status(js: dict) -> str:
@@ -328,9 +397,17 @@ def extract_amount(js: dict, fallback: int) -> int:
         except:
             return fallback
 
+
+def extract_paysync_time(js: dict) -> str:
+    return str(js.get("time", "")).strip()
+
 # ================== FSM ==================
 class TopupStates(StatesGroup):
     waiting_amount = State()
+
+
+class PromoStates(StatesGroup):
+    waiting_code = State()
 
 
 class AddStockStates(StatesGroup):
@@ -345,39 +422,50 @@ async def cmd_start(message: Message):
     username = message.from_user.username or "unknown"
     await ensure_user(message.from_user.id, username)
     bal, orders = await get_stats(message.from_user.id)
-    
-    text = MAIN_TEXT.format(balance=f"{bal:.2f}", orders=orders, uah=UAH)
-    await message.answer(text, reply_markup=bottom_menu())
+    caption = MAIN_CAPTION.format(balance=f"{bal:.2f}", orders=orders, uah=UAH)
+    try:
+        await message.answer_photo(
+            photo="https://i.postimg.cc/0jQVyKJX/italian-square.jpg",
+            caption=caption,
+            reply_markup=bottom_menu()
+        )
+    except:
+        await message.answer(caption, reply_markup=bottom_menu())
 
 
-@dp.message(F.text.contains("🏠 ГОЛОВНА"))
+@dp.message(F.text.contains("🏠 ГЛАВНАЯ"))
 async def btn_main(message: Message):
     username = message.from_user.username or "unknown"
     await ensure_user(message.from_user.id, username)
     bal, orders = await get_stats(message.from_user.id)
-    
-    text = MAIN_TEXT.format(balance=f"{bal:.2f}", orders=orders, uah=UAH)
-    await message.answer(text, reply_markup=inline_cities())
+    caption = MAIN_CAPTION.format(balance=f"{bal:.2f}", orders=orders, uah=UAH)
+    try:
+        await message.answer_photo(
+            photo="https://i.postimg.cc/0jQVyKJX/italian-square.jpg",
+            caption=caption,
+            reply_markup=inline_city()
+        )
+    except:
+        await message.answer(caption, reply_markup=inline_city())
 
 
-@dp.message(F.text.contains("👤 ПРОФІЛЬ"))
+@dp.message(F.text.contains("👤 ПРОФИЛЬ"))
 async def btn_profile(message: Message):
     username = message.from_user.username or "unknown"
     await ensure_user(message.from_user.id, username)
     bal, orders = await get_stats(message.from_user.id)
-    
     text = PROFILE_TEXT.format(balance=f"{bal:.2f}", orders=orders, uah=UAH)
     await message.answer(text, reply_markup=inline_profile())
 
 
-@dp.message(F.text.contains("💬 ДОПОМОГА"))
+@dp.message(F.text.contains("💬 ПОМОЩЬ"))
 async def btn_help(message: Message):
     await message.answer(HELP_TEXT, reply_markup=bottom_menu())
 
 
-@dp.message(F.text.contains("📋 ПРАВИЛА ПЗ"))
-async def btn_rules(message: Message):
-    await message.answer(RULES_TEXT, reply_markup=bottom_menu())
+@dp.message(F.text.contains("📋 РАБОТА"))
+async def btn_work(message: Message):
+    await message.answer("Ищем ответственных! Пиши: @italiansquare", reply_markup=bottom_menu())
 
 
 @dp.callback_query(F.data == "noop")
@@ -393,30 +481,17 @@ async def cb_city(call: CallbackQuery):
 
     async with pool.acquire() as con:
         rows = await con.fetch("""
-            SELECT DISTINCT product_name, price, photo_id, description
+            SELECT DISTINCT product_name, price
             FROM stock
-            WHERE city=$1 AND is_active=TRUE
+            WHERE city=$1 AND is_active=TRUE AND sold_at IS NULL
             ORDER BY product_name
         """, city)
 
     if not rows:
-        await call.message.answer("❌ Товарів немає", reply_markup=inline_cities())
+        await call.message.answer("Товаров нет")
         return
 
-    city_name = CITIES[city]["name"]
-    text = f"🏪 Товари в {city_name}:\n\nВибери товар:"
-    
-    kb = []
-    for r in rows:
-        kb.append([
-            InlineKeyboardButton(
-                text=f"{r['product_name']} • {decimal.Decimal(r['price']):.0f} {UAH}",
-                callback_data=f"prod:{city}:{r['product_name']}"
-            )
-        ])
-    kb.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="back:main")])
-    
-    await call.message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+    await call.message.answer("Выбери товар:", reply_markup=inline_products(rows, city))
 
 
 @dp.callback_query(F.data.startswith("prod:"))
@@ -426,322 +501,59 @@ async def cb_product(call: CallbackQuery):
     assert pool is not None
 
     async with pool.acquire() as con:
-        row = await con.fetchrow("""
-            SELECT photo_id, price, description, districts
+        rows = await con.fetch("""
+            SELECT id, district, price, description
             FROM stock
-            WHERE city=$1 AND product_name=$2 AND is_active=TRUE
-            LIMIT 1
+            WHERE city=$1 AND product_name=$2 AND is_active=TRUE AND sold_at IS NULL
+              AND (reserved_until IS NULL OR reserved_until < NOW())
+            ORDER BY district
         """, city, product)
 
-    if not row:
-        await call.message.answer("❌ Товар недоступний")
+    if not rows:
+        await call.message.answer("Районов нет или все зарезервировано")
         return
 
-    districts_list = row['districts'].split(",") if isinstance(row['districts'], str) else row['districts']
-    districts_list = [d.strip() for d in districts_list]
-
-    text = f"""📦 {product}
-
-💰 Ціна: {decimal.Decimal(row['price']):.0f} {UAH}
-
-📝 Опис: {row['description'] or 'Немає'}
-
-🏙️ Вибери район:"""
-
-    kb = []
-    for district in districts_list:
-        kb.append([
-            InlineKeyboardButton(
-                text=f"📍 {district}",
-                callback_data=f"district:{city}:{product}:{district}"
-            )
-        ])
-    kb.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="back:main")])
-
-    await call.message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+    await call.message.answer(f"Выбери район для {product}:", reply_markup=inline_districts(rows, city, product))
 
 
 @dp.callback_query(F.data.startswith("district:"))
 async def cb_district(call: CallbackQuery):
     await call.answer()
-    _, city, product, district = call.data.split(":", 3)
+    _, city, product, stock_id = call.data.split(":", 3)
+    stock_id = int(stock_id)
+    
     assert pool is not None
-
     async with pool.acquire() as con:
-        row = await con.fetchrow("""
-            SELECT id, photo_id, price, description
-            FROM stock
-            WHERE city=$1 AND product_name=$2 AND is_active=TRUE
-            LIMIT 1
-        """, city, product)
+        item = await con.fetchrow("""
+            SELECT * FROM stock WHERE id=$1 AND is_active=TRUE AND sold_at IS NULL
+        """, stock_id)
 
-    if not row:
-        await call.message.answer("❌ Товар недоступний")
+    if not item:
+        await call.message.answer("Товар недоступен")
         return
 
-    stock_id = row['id']
-    price = decimal.Decimal(row['price'])
-
-    text = f"""✅ ЗАМОВЛЕННЯ
-
-📦 Товар: {product}
-🏙️ Район: {district}
-💰 Ціна: {price:.0f} {UAH}
-
-Виберіть спосіб оплати:"""
-
-    kb = [
-        [InlineKeyboardButton(text="💳 PaySync", callback_data=f"pay:card:{stock_id}:{district}")],
-        [InlineKeyboardButton(text="💰 Баланс", callback_data=f"pay:bal:{stock_id}:{district}")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="back:main")]
-    ]
-
-    await call.message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
-
-
-@dp.callback_query(F.data.startswith("pay:bal:"))
-async def cb_pay_balance(call: CallbackQuery):
-    await call.answer()
-    parts = call.data.split(":")
-    stock_id = int(parts[2])
-    district = parts[3] if len(parts) > 3 else "unknown"
-    uid = call.from_user.id
-
-    try:
-        assert pool is not None
-        async with pool.acquire() as con:
-            async with con.transaction():
-                item = await con.fetchrow(
-                    "SELECT * FROM stock WHERE id=$1 FOR UPDATE", stock_id
-                )
-
-                if not item:
-                    await call.message.answer("❌ Товар недоступний")
-                    return
-
-                user = await con.fetchrow("SELECT * FROM users WHERE user_id=$1 FOR UPDATE", uid)
-                if not user:
-                    username = call.from_user.username or "unknown"
-                    await ensure_user(uid, username)
-                    user = await con.fetchrow("SELECT * FROM users WHERE user_id=$1", uid)
-
-                price = decimal.Decimal(item["price"])
-                balance = decimal.Decimal(user["balance"])
-
-                if balance < price:
-                    await call.message.answer(
-                        f"❌ Недостатньо коштів\n\nПотрібно: {price:.0f} {UAH}\nНа рахунку: {balance:.0f} {UAH}"
-                    )
-                    return
-
-                await con.execute(
-                    "UPDATE users SET balance = balance - $2, orders_count = orders_count + 1 WHERE user_id = $1",
-                    uid, price
-                )
-
-                current_time = get_ukraine_time()
-                username = call.from_user.username or "unknown"
-
-                await con.execute("""
-                    INSERT INTO sales(user_id, username, stock_id, product_name, city, district, price, payment_method, paid_at)
-                    VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)
-                """,
-                    uid, username, stock_id, item["product_name"],
-                    item["city"], district, price, "balance", current_time
-                )
-
-        text = f"""✅ ПОКУПКА УСПІШНА
-
-📦 Товар: {item['product_name']}
-📍 Район: {district}
-💰 Ціна: {price:.0f} {UAH}
-⏰ Час: {format_ukraine_time(current_time)}
-
-Дякуємо за покупку! 🎉"""
-
-        await call.message.answer(text)
-
-    except Exception as e:
-        print(f"[PAY BALANCE ERROR] {repr(e)}")
-        await call.message.answer(f"❌ Помилка: {str(e)[:200]}")
-
-
-@dp.callback_query(F.data.startswith("pay:card:"))
-async def cb_pay_card(call: CallbackQuery):
-    await call.answer()
-    parts = call.data.split(":")
-    stock_id = int(parts[2])
-    district = parts[3] if len(parts) > 3 else "unknown"
-    uid = call.from_user.id
-
-    try:
-        assert pool is not None
-
-        async with pool.acquire() as con:
-            item = await con.fetchrow(
-                "SELECT * FROM stock WHERE id=$1", stock_id
-            )
-
-            if not item:
-                await call.message.answer("❌ Товар недоступний")
-                return
-
-            price = int(decimal.Decimal(item["price"]))
-            nonce = uuid.uuid4().hex[:12]
-            payload = f"buy:{uid}:{stock_id}:{nonce}"
-
-        js = await paysync_create(price, payload)
-
-        trade_id = extract_trade_id(js)
-        card_number = extract_card_number(js)
-        real_amount = extract_amount(js, price)
-        expires_at = get_ukraine_time() + timedelta(minutes=PAYMENT_TIMEOUT_MINUTES)
-
-        async with pool.acquire() as con:
-            await con.execute("""
-                INSERT INTO invoices(
-                    trade_id, user_id, stock_id, kind, amount_int, currency, provider, status, expires_at
-                )
-                VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)
-                ON CONFLICT (trade_id) DO NOTHING
-            """,
-                trade_id, uid, stock_id, "purchase", real_amount,
-                PAYSYNC_CURRENCY, "paysync", "wait", expires_at
-            )
-
-        expire_text = format_ukraine_time(expires_at)
-        text = (
-            f"""💳 ОПЛАТА ЗАМОВЛЕННЯ
-
-📦 Товар: {item['product_name']}
-📍 Район: {district}
-
-🧾 Заявка: {trade_id}
-🏦 Карта: {card_number}
-💰 Сума: {real_amount} {PAYSYNC_CURRENCY}
-⏳ Термін: до {expire_text}
-
-❗️ Переведи точну суму одним платежем"""
-        )
-        
-        kb = [
-            [InlineKeyboardButton(text="✅ Перевірити оплату", callback_data=f"check:{trade_id}")],
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="back:main")]
-        ]
-
-        await call.message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
-
-    except Exception as e:
-        print(f"[CARD ERROR] {repr(e)}")
-        await call.message.answer(f"❌ Помилка: {str(e)[:200]}")
-
-
-@dp.callback_query(F.data.startswith("check:"))
-async def cb_check(call: CallbackQuery):
-    await call.answer()
-    trade_id = call.data.split(":", 1)[1]
-
-    try:
-        assert pool is not None
-
-        async with pool.acquire() as con:
-            inv = await con.fetchrow("SELECT * FROM invoices WHERE trade_id=$1", trade_id)
-
-        if not inv:
-            await call.message.answer("❌ Заявку не знайдено")
-            return
-
-        if inv["status"] == "paid":
-            await call.message.answer("✅ Заявка вже оброблена")
-            return
-
-        js = await paysync_check(trade_id)
-        status = extract_status(js)
-
-        if status in {"paid", "success", "succeeded", "completed"}:
-            async with pool.acquire() as con:
-                async with con.transaction():
-                    inv = await con.fetchrow(
-                        "SELECT * FROM invoices WHERE trade_id=$1 FOR UPDATE", trade_id
-                    )
-
-                    if not inv or inv["status"] == "paid":
-                        await call.message.answer("✅ Платіж обробляється")
-                        return
-
-                    item = await con.fetchrow("SELECT * FROM stock WHERE id=$1", inv["stock_id"])
-                    
-                    current_time = get_ukraine_time()
-                    username = call.from_user.username or "unknown"
-
-                    # Получить район из последней попытки
-                    sales_row = await con.fetchrow("""
-                        SELECT district FROM sales WHERE stock_id=$1 ORDER BY paid_at DESC LIMIT 1
-                    """, inv["stock_id"])
-                    
-                    district = sales_row["district"] if sales_row else "unknown"
-
-                    await con.execute("""
-                        INSERT INTO sales(user_id, username, stock_id, product_name, city, district, price, payment_method, paid_at)
-                        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)
-                    """,
-                        inv["user_id"], username, inv["stock_id"],
-                        item["product_name"], item["city"],
-                        district, inv["amount_int"], "paysync", current_time
-                    )
-
-                    await con.execute(
-                        "UPDATE users SET orders_count = orders_count + 1 WHERE user_id = $1",
-                        inv["user_id"]
-                    )
-
-                    await con.execute(
-                        "UPDATE invoices SET status='paid', paid_at=NOW() WHERE trade_id=$1",
-                        trade_id
-                    )
-
-            text = f"""✅ ПОКУПКА УСПІШНА
-
-📦 Товар: {item['product_name']}
-💰 Сума: {inv['amount_int']} {inv['currency']}
-⏰ Час: {format_ukraine_time(current_time)}
-
-Дякуємо за замовлення! 🎉"""
-
-            await call.message.answer(text)
-            return
-
-        elif status in {"expired", "cancelled", "canceled", "failed"}:
-            async with pool.acquire() as con:
-                await con.execute(
-                    "UPDATE invoices SET status=$2 WHERE trade_id=$1",
-                    trade_id, status
-                )
-
-            await call.message.answer(f"❌ Платіж скасований: {status}")
-            return
-
-        else:
-            await call.message.answer("⏳ Платіж ще не підтверджено. Спробуй через хвилину")
-            return
-
-    except Exception as e:
-        print(f"[CHECK ERROR] {repr(e)}")
-        await call.message.answer(f"❌ Помилка: {str(e)[:200]}")
+    text = ITEM_TEXT.format(
+        name=item["product_name"],
+        price=f"{decimal.Decimal(item['price']):.0f}",
+        district=item["district"],
+        desc=item["description"] or "Без описания",
+        uah=UAH
+    )
+    await call.message.answer(text, reply_markup=inline_pay(stock_id))
 
 
 @dp.callback_query(F.data == "profile:topup")
 async def cb_topup(call: CallbackQuery, state: FSMContext):
     await call.answer()
     await state.set_state(TopupStates.waiting_amount)
-    await call.message.answer(f"💳 Введи суму пополнення (мін. 10 {UAH}):")
+    await call.message.answer(TOPUP_TEXT)
 
 
 @dp.message(TopupStates.waiting_amount)
 async def topup_amount(message: Message, state: FSMContext):
     amount = parse_amount(message.text)
     if not amount or amount < 10:
-        await message.answer(f"❌ Мінімум 10 {UAH}")
+        await message.answer(f"Минимум 10 {UAH}")
         return
 
     username = message.from_user.username or "unknown"
@@ -755,6 +567,7 @@ async def topup_amount(message: Message, state: FSMContext):
         trade_id = extract_trade_id(js)
         card_number = extract_card_number(js)
         real_amount = extract_amount(js, amount)
+        paysync_time = extract_paysync_time(js)
         expires_at = get_ukraine_time() + timedelta(minutes=PAYMENT_TIMEOUT_MINUTES)
 
         assert pool is not None
@@ -772,22 +585,285 @@ async def topup_amount(message: Message, state: FSMContext):
 
         expire_text = format_ukraine_time(expires_at)
         text = (
-            f"""💳 ПОПОЛНЕННЯ БАЛАНСУ
-
-🧾 Заявка: {trade_id}
-🏦 Карта: {card_number}
-💰 Сума: {real_amount} {PAYSYNC_CURRENCY}
-⏳ Термін: до {expire_text}
-
-❗️ Переведи точну суму одним платежем"""
+            "💳 Пополнение баланса\n\n"
+            f"Заявка: {trade_id}\n"
+            f"Карта: {card_number}\n"
+            f"Сумма: {real_amount} {PAYSYNC_CURRENCY}\n"
+            f"Срок: до {expire_text}\n\n"
+            "Оплати точно указанную сумму одним платежом"
         )
         await message.answer(text, reply_markup=inline_check(trade_id))
 
     except Exception as e:
         print(f"[TOPUP ERROR] {repr(e)}")
-        await message.answer(f"❌ Помилка: {str(e)[:200]}")
+        await message.answer(f"Ошибка: {str(e)[:200]}")
     finally:
         await state.clear()
+
+
+@dp.callback_query(F.data.startswith("pay:bal:"))
+async def cb_pay_balance(call: CallbackQuery):
+    await call.answer()
+    stock_id = int(call.data.split(":")[2])
+    uid = call.from_user.id
+    username = call.from_user.username or "unknown"
+
+    try:
+        assert pool is not None
+        async with pool.acquire() as con:
+            async with con.transaction():
+                item = await con.fetchrow(
+                    "SELECT * FROM stock WHERE id=$1 FOR UPDATE", stock_id
+                )
+
+                if not item or item["sold_at"]:
+                    await call.message.answer("Товар недоступен")
+                    return
+
+                user = await con.fetchrow("SELECT * FROM users WHERE user_id=$1 FOR UPDATE", uid)
+                if not user:
+                    await ensure_user(uid, username)
+                    user = await con.fetchrow("SELECT * FROM users WHERE user_id=$1", uid)
+
+                price = decimal.Decimal(item["price"])
+                balance = decimal.Decimal(user["balance"])
+
+                if balance < price:
+                    await call.message.answer(f"Недостаточно средств\nНужно: {price:.0f} {UAH}\nВ наличии: {balance:.0f} {UAH}")
+                    return
+
+                await con.execute(
+                    "UPDATE users SET balance = balance - $2, orders_count = orders_count + 1 WHERE user_id = $1",
+                    uid, price
+                )
+
+                await con.execute(
+                    "UPDATE stock SET sold_to=$2, sold_at=NOW(), reserved_by=NULL, reserved_until=NULL WHERE id=$1",
+                    stock_id, uid
+                )
+
+                current_time = get_ukraine_time()
+
+                await con.execute("""
+                    INSERT INTO purchases(user_id, username, stock_id, product_name, district, city, price, photo_id, provider, paid_at)
+                    VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+                """,
+                    uid, username, stock_id, item["product_name"], item["district"],
+                    item["city"], price, item["photo_id"], "balance", current_time
+                )
+
+        text = f"✅ Покупка успешна\n\n{item['product_name']}\n📍 {item['district']}\n💰 {price:.0f} {UAH}"
+        
+        if item["photo_id"]:
+            await call.message.answer_photo(
+                photo=item["photo_id"],
+                caption=text
+            )
+        else:
+            await call.message.answer(text)
+
+    except Exception as e:
+        print(f"[PAY BALANCE ERROR] {repr(e)}")
+        await call.message.answer(f"Ошибка: {str(e)[:200]}")
+
+
+@dp.callback_query(F.data.startswith("pay:card:"))
+async def cb_pay_card(call: CallbackQuery):
+    await call.answer()
+    stock_id = int(call.data.split(":")[2])
+    uid = call.from_user.id
+    username = call.from_user.username or "unknown"
+
+    try:
+        assert pool is not None
+
+        async with pool.acquire() as con:
+            async with con.transaction():
+                item = await con.fetchrow(
+                    "SELECT * FROM stock WHERE id=$1 FOR UPDATE", stock_id
+                )
+
+                if not item or item["sold_at"]:
+                    await call.message.answer("Товар ��едоступен")
+                    return
+
+                # РЕЗЕРВИРУЕМ ТОВАР НА 15 МИНУТ
+                reserve_until = get_ukraine_time() + timedelta(minutes=PAYMENT_TIMEOUT_MINUTES)
+                await con.execute(
+                    "UPDATE stock SET reserved_by=$2, reserved_until=$3 WHERE id=$1",
+                    stock_id, uid, reserve_until
+                )
+
+                price = int(decimal.Decimal(item["price"]))
+                nonce = uuid.uuid4().hex[:12]
+                payload = f"buy:{uid}:{stock_id}:{nonce}"
+
+        js = await paysync_create(price, payload)
+
+        trade_id = extract_trade_id(js)
+        card_number = extract_card_number(js)
+        real_amount = extract_amount(js, price)
+        paysync_time = extract_paysync_time(js)
+        expires_at = get_ukraine_time() + timedelta(minutes=PAYMENT_TIMEOUT_MINUTES)
+
+        async with pool.acquire() as con:
+            await con.execute("""
+                INSERT INTO invoices(
+                    trade_id, user_id, kind, amount_int, currency, stock_id, provider, status, expires_at
+                )
+                VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)
+                ON CONFLICT (trade_id) DO NOTHING
+            """,
+                trade_id, uid, "purchase", real_amount, PAYSYNC_CURRENCY, stock_id, "paysync", "wait", expires_at
+            )
+
+        expire_text = format_ukraine_time(expires_at)
+        text = (
+            "💳 Оплата товара\n\n"
+            f"{item['product_name']}\n"
+            f"📍 {item['district']}\n"
+            f"Заявка: {trade_id}\n"
+            f"Карта: {card_number}\n"
+            f"Сумма: {real_amount} {PAYSYNC_CURRENCY}\n"
+            f"Срок: до {expire_text}\n\n"
+            "Оплати точно указанную сумму одним платежом"
+        )
+        await call.message.answer(text, reply_markup=inline_check(trade_id))
+
+    except Exception as e:
+        print(f"[CARD ERROR] {repr(e)}")
+        await call.message.answer(f"Ошибка: {str(e)[:200]}")
+
+
+@dp.callback_query(F.data.startswith("check:"))
+async def cb_check(call: CallbackQuery):
+    await call.answer()
+    trade_id = call.data.split(":", 1)[1]
+
+    try:
+        assert pool is not None
+
+        async with pool.acquire() as con:
+            inv = await con.fetchrow("SELECT * FROM invoices WHERE trade_id=$1", trade_id)
+
+        if not inv:
+            await call.message.answer("Счет не найден")
+            return
+
+        if inv["status"] == "paid":
+            await call.message.answer("Счет обработан")
+            return
+
+        js = await paysync_check(trade_id)
+        status = extract_status(js)
+
+        if status in {"paid", "success", "succeeded", "completed"}:
+            async with pool.acquire() as con:
+                async with con.transaction():
+                    inv = await con.fetchrow(
+                        "SELECT * FROM invoices WHERE trade_id=$1 FOR UPDATE", trade_id
+                    )
+
+                    if not inv or inv["status"] == "paid":
+                        await call.message.answer("Платеж обработан")
+                        return
+
+                    if inv["kind"] == "topup":
+                        await con.execute(
+                            "UPDATE users SET balance = balance + $2 WHERE user_id = $1",
+                            inv["user_id"], inv["amount_int"]
+                        )
+
+                        await con.execute(
+                            "UPDATE invoices SET status='paid', paid_at=NOW() WHERE trade_id=$1",
+                            trade_id
+                        )
+
+                        await call.message.answer(
+                            f"✅ Платеж подтвержден\n\nБаланс пополнен на {inv['amount_int']} {inv['currency']}"
+                        )
+                        return
+
+                    if inv["kind"] == "purchase" and inv["stock_id"]:
+                        item = await con.fetchrow(
+                            "SELECT * FROM stock WHERE id=$1 FOR UPDATE",
+                            inv["stock_id"]
+                        )
+
+                        if not item:
+                            await call.message.answer("Товар не найден")
+                            return
+
+                        if item["sold_at"]:
+                            await con.execute(
+                                "UPDATE invoices SET status='paid', paid_at=NOW() WHERE trade_id=$1",
+                                trade_id
+                            )
+                            await call.message.answer("Товар уже продан")
+                            return
+
+                        await con.execute(
+                            "UPDATE stock SET sold_to=$2, sold_at=NOW(), reserved_by=NULL, reserved_until=NULL WHERE id=$1",
+                            inv["stock_id"], inv["user_id"]
+                        )
+
+                        await con.execute(
+                            "UPDATE users SET orders_count = orders_count + 1 WHERE user_id = $1",
+                            inv["user_id"]
+                        )
+
+                        user = await con.fetchrow("SELECT username FROM users WHERE user_id=$1", inv["user_id"])
+                        username = user["username"] if user else "unknown"
+
+                        current_time = get_ukraine_time()
+
+                        await con.execute("""
+                            INSERT INTO purchases(user_id, username, stock_id, product_name, district, city, price, photo_id, provider, paid_at)
+                            VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+                        """,
+                            inv["user_id"], username, inv["stock_id"], item["product_name"],
+                            item["district"], item["city"], item["price"], item["photo_id"], "paysync", current_time
+                        )
+
+                        await con.execute(
+                            "UPDATE invoices SET status='paid', paid_at=NOW() WHERE trade_id=$1",
+                            trade_id
+                        )
+
+                        text = f"✅ Покупка успешна\n\n{item['product_name']}\n📍 {item['district']}\n💰 {decimal.Decimal(item['price']):.0f} {UAH}"
+                        
+                        if item["photo_id"]:
+                            await call.message.answer_photo(
+                                photo=item["photo_id"],
+                                caption=text
+                            )
+                        else:
+                            await call.message.answer(text)
+                        return
+
+        elif status in {"expired", "cancelled", "canceled", "failed"}:
+            async with pool.acquire() as con:
+                # Снимаем резервацию если она была
+                await con.execute(
+                    "UPDATE stock SET reserved_by=NULL, reserved_until=NULL WHERE id=$1 AND reserved_by=$2",
+                    inv["stock_id"], inv["user_id"]
+                )
+
+                await con.execute(
+                    "UPDATE invoices SET status=$2 WHERE trade_id=$1",
+                    trade_id, status
+                )
+
+            await call.message.answer(f"Платеж отклонен: {status}")
+            return
+
+        else:
+            await call.message.answer("Платеж не подтвержден. Попробуй через минуту")
+            return
+
+    except Exception as e:
+        print(f"[CHECK ERROR] {repr(e)}")
+        await call.message.answer(f"Ошибка: {str(e)[:200]}")
 
 
 @dp.callback_query(F.data == "profile:history")
@@ -797,33 +873,90 @@ async def cb_history(call: CallbackQuery):
 
     async with pool.acquire() as con:
         rows = await con.fetch("""
-            SELECT product_name, district, city, price, payment_method, paid_at
-            FROM sales
+            SELECT product_name, district, city, price, provider, paid_at
+            FROM purchases
             WHERE user_id=$1
             ORDER BY paid_at DESC
             LIMIT 20
         """, call.from_user.id)
 
     if not rows:
-        await call.message.answer("📭 Історія пуста", reply_markup=inline_profile())
+        await call.message.answer("История пуста")
         return
 
-    text = "📊 ІСТОРІЯ ПОКУПОК:\n\n"
+    text = "🧾 История покупок:\n\n"
     for r in rows:
         dt = format_ukraine_time(r["paid_at"])
         price = decimal.Decimal(r["price"])
-        text += f"""• {r['product_name']}
-   📍 {r['district']} ({r['city']})
-   💰 {price:.0f} {UAH}
-   ⏰ {dt}\n\n"""
+        text += f"• {r['product_name']} ({r['city']})\n  📍 {r['district']} — {price:.0f} {UAH}\n  {dt}\n\n"
 
-    await call.message.answer(text, reply_markup=inline_profile())
+    await call.message.answer(text)
 
 
-@dp.callback_query(F.data.startswith("back:"))
-async def cb_back(call: CallbackQuery):
+@dp.callback_query(F.data == "profile:promo")
+async def cb_promo(call: CallbackQuery, state: FSMContext):
     await call.answer()
-    await cmd_start(call.message)
+    await state.set_state(PromoStates.waiting_code)
+    await call.message.answer("Введи промокод:")
+
+
+@dp.message(PromoStates.waiting_code)
+async def promo_code(message: Message, state: FSMContext):
+    code = message.text.strip().upper()
+    uid = message.from_user.id
+
+    try:
+        assert pool is not None
+
+        async with pool.acquire() as con:
+            promo = await con.fetchrow(
+                "SELECT * FROM promo_codes WHERE code=$1 AND is_active=TRUE",
+                code
+            )
+
+            if not promo:
+                await message.answer("Промокод не найден")
+                await state.clear()
+                return
+
+            if promo["current_uses"] >= promo["max_uses"]:
+                await message.answer("Промокод исчерпан")
+                await state.clear()
+                return
+
+            used = await con.fetchval(
+                "SELECT COUNT(*) FROM promo_usage WHERE user_id=$1 AND promo_code=$2",
+                uid, code
+            )
+
+            if used:
+                await message.answer("Ты уже использовал этот промокод")
+                await state.clear()
+                return
+
+            async with con.transaction():
+                await con.execute(
+                    "UPDATE users SET balance = balance + $2 WHERE user_id = $1",
+                    uid, promo["discount_amount"]
+                )
+
+                await con.execute(
+                    "INSERT INTO promo_usage(user_id, promo_code) VALUES($1, $2)",
+                    uid, code
+                )
+
+                await con.execute(
+                    "UPDATE promo_codes SET current_uses = current_uses + 1 WHERE code = $1",
+                    code
+                )
+
+        await message.answer(f"✅ Промокод активирован\nДобавлено: {promo['discount_amount']} {UAH}")
+
+    except Exception as e:
+        print(f"[PROMO ERROR] {repr(e)}")
+        await message.answer(f"Ошибка: {str(e)[:200]}")
+    finally:
+        await state.clear()
 
 
 # ================== ADMIN COMMANDS ==================
@@ -837,31 +970,24 @@ async def cmd_add_stock(message: Message, state: FSMContext):
         parts = [p.strip() for p in raw.split("|")]
 
         if len(parts) < 4:
-            await message.answer("Формат: /addstock місто | товар | райони(через,запятую) | ціна | опис")
+            await message.answer("Формат: /addstock город | товар | район | цена | описание")
             return
 
-        city = parts[0].lower()
-        product = parts[1]
-        districts_raw = parts[2]
-        price_raw = parts[3]
+        city, product, district, price_raw = parts[0], parts[1], parts[2], parts[3]
         desc = parts[4] if len(parts) > 4 else ""
 
-        if city not in CITIES:
-            await message.answer(f"Місто: {', '.join(CITIES.keys())}")
+        if city not in ["odesa", "lviv"]:
+            await message.answer("Город: odesa или lviv")
             return
 
         price = decimal.Decimal(price_raw)
-        districts_str = districts_raw
 
         await state.set_state(AddStockStates.waiting_photo)
-        await state.update_data(
-            city=city, product=product, districts=districts_str,
-            price=price, desc=desc
-        )
-        await message.answer(f"📸 Відправ фото для {product}")
+        await state.update_data(city=city, product=product, district=district, price=price, desc=desc)
+        await message.answer(f"Отправь фото для {product} ({district})")
 
     except Exception as e:
-        await message.answer(f"❌ Помилка: {str(e)[:300]}")
+        await message.answer(f"Ошибка: {str(e)[:300]}")
 
 
 @dp.message(AddStockStates.waiting_photo, F.photo)
@@ -873,25 +999,73 @@ async def handle_stock_photo(message: Message, state: FSMContext):
         assert pool is not None
         async with pool.acquire() as con:
             await con.execute("""
-                INSERT INTO stock(city, product_name, districts, price, photo_id, description, is_active)
+                INSERT INTO stock(city, product_name, district, price, photo_id, description, is_active)
                 VALUES($1,$2,$3,$4,$5,$6,TRUE)
             """,
-                data["city"], data["product"],
-                data["districts"],
-                data["price"], photo_id, data["desc"]
+                data["city"], data["product"], data["district"], data["price"], photo_id, data["desc"]
             )
 
-        await message.answer(
-            f"✅ Товар додано\n\n"
-            f"{data['product']}\n"
-            f"📍 Райони: {data['districts']}\n"
-            f"💰 Ціна: {data['price']:.0f} {UAH}"
-        )
+        await message.answer(f"✅ Товар добавлен\n{data['product']} ({data['district']})")
 
     except Exception as e:
-        await message.answer(f"❌ Помилка: {str(e)[:300]}")
+        await message.answer(f"Ошибка: {str(e)[:300]}")
     finally:
         await state.clear()
+
+
+@dp.message(F.text.startswith("/stock"))
+async def cmd_stock(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+
+    try:
+        assert pool is not None
+        async with pool.acquire() as con:
+            rows = await con.fetch("""
+                SELECT id, city, product_name, district, price, sold_at, is_active, reserved_until
+                FROM stock
+                ORDER BY city, product_name, district DESC
+                LIMIT 100
+            """)
+
+        if not rows:
+            await message.answer("Товаров нет")
+            return
+
+        text = "📦 Товары:\n\n"
+        for r in rows:
+            state_emoji = "✅"
+            if r["sold_at"]:
+                state_emoji = "🔒"
+            elif not r["is_active"]:
+                state_emoji = "⏹️"
+            elif r["reserved_until"] and r["reserved_until"] > get_ukraine_time():
+                state_emoji = "⏱️"
+            
+            text += f"{state_emoji} #{r['id']} | {r['city'][:2].upper()} | {r['product_name']} — {r['district']} | {decimal.Decimal(r['price']):.0f} {UAH}\n"
+
+        await message.answer(text)
+
+    except Exception as e:
+        await message.answer(f"Ошибка: {str(e)[:300]}")
+
+
+@dp.message(F.text.startswith("/delstock"))
+async def cmd_del_stock(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+
+    try:
+        stock_id = int(message.text.replace("/delstock", "").strip())
+
+        assert pool is not None
+        async with pool.acquire() as con:
+            await con.execute("UPDATE stock SET is_active=FALSE WHERE id=$1", stock_id)
+
+        await message.answer(f"✅ Товар {stock_id} отключен")
+
+    except Exception as e:
+        await message.answer(f"Ошибка: {str(e)[:300]}")
 
 
 @dp.message(F.text.startswith("/sales"))
@@ -903,32 +1077,67 @@ async def cmd_sales(message: Message):
         assert pool is not None
         async with pool.acquire() as con:
             rows = await con.fetch("""
-                SELECT id, user_id, username, product_name, city, district, price, payment_method, paid_at
-                FROM sales
+                SELECT user_id, username, product_name, district, city, price, provider, paid_at
+                FROM purchases
                 ORDER BY paid_at DESC
                 LIMIT 50
             """)
 
         if not rows:
-            await message.answer("📭 Продажів немає")
+            await message.answer("Продажей нет")
             return
 
-        text = "💰 ТАБЛИЦЯ ПРОДАЖІВ (останні 50):\n\n"
+        text = "💰 ТАБЛИЦА ПРОДАЖЕЙ (последние 50):\n\n"
         for r in rows:
             dt = format_ukraine_time(r["paid_at"])
-            text += f"""ID: {r['id']} | UID: {r['user_id']}
-👤 {r['username']}
+            text += f"""UID: {r['user_id']} | @{r['username']}
 📦 {r['product_name']} ({r['city']} - {r['district']})
-💰 {decimal.Decimal(r['price']):.0f} {UAH} | {r['payment_method']}
+💰 {decimal.Decimal(r['price']):.0f} {UAH} | {r['provider']}
 ⏰ {dt}
-━━━━━━━━━━━━━━━━━━\n"""
+━━━━━━━━━━━━━━━━\n"""
 
         await message.answer(text)
 
     except Exception as e:
-        await message.answer(f"❌ Помилка: {str(e)[:300]}")
+        await message.answer(f"Ошибка: {str(e)[:300]}")
 
 
+@dp.message(F.text.startswith("/addpromo"))
+async def cmd_add_promo(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+
+    try:
+        raw = message.text.replace("/addpromo", "", 1).strip()
+        parts = [p.strip() for p in raw.split("|")]
+
+        if len(parts) < 3:
+            await message.answer("Формат: /addpromo КОД | СУММА | МАКС_ИСПОЛЬЗОВАНИЙ")
+            return
+
+        code = parts[0].upper()
+        discount = int(parts[1])
+        max_uses = int(parts[2])
+
+        assert pool is not None
+        async with pool.acquire() as con:
+            await con.execute("""
+                INSERT INTO promo_codes(code, discount_amount, max_uses, is_active)
+                VALUES($1, $2, $3, TRUE)
+                ON CONFLICT(code) DO UPDATE SET
+                    discount_amount=EXCLUDED.discount_amount,
+                    max_uses=EXCLUDED.max_uses,
+                    is_active=TRUE,
+                    current_uses=0
+            """, code, discount, max_uses)
+
+        await message.answer(f"✅ Промокод {code}: {discount} {UAH} × {max_uses}")
+
+    except Exception as e:
+        await message.answer(f"Ошибка: {str(e)[:300]}")
+
+
+# ================== MAIN ==================
 async def main():
     await db_init()
     bot = Bot(token=BOT_TOKEN)
