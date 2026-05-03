@@ -51,6 +51,23 @@ CLIENT_ID = int(PAYSYNC_CLIENT_ID_RAW)
 UAH = "₴"
 UKRAINE_TZ = ZoneInfo("Europe/Kyiv")
 
+# ================== ШШ ТОВАР (OPIUM) ==================
+SHH_PHOTO_ID = "AgACAgIAAxkBAAICaGZnH3Jh-p6p7Z0Z0Z0Z0Z0Z0Z0CAAGCejEbZ0Z0Z0Z0Z0Z0Z0Z0Z0Z"  # БУДЕТ ЗАГРУЖЕННЫЙ ID
+SHH_DESCRIPTION = """THC: 22–26%
+
+OPIUM — мощный гибридный сорт с плотным насыщенным эффектом и выразительным ароматом, созданный для тех, кто ценит качество и глубокое расслабление. Шишки плотные, смолистые, с тёмно-зелёными оттенками и возможными фиолетовыми акцентами, что придаёт сорту премиальный внешний вид.
+
+Аромат богатый и многослойный: сладковато-пряные ноты сочетаются с лёгкой землистостью, травянистым фоном и приятным терпким послевкусием. Дым мягкий, густой и насыщенный.
+
+Эффект начинается с заметного подъёма настроения, лёгкой эйфории и приятной ясности, после чего постепенно переходит в глубокий телесный релакс и чувство полного спокойствия. Отлично подходит для вечернего времени, отдыха, музыки и снятия напряжения после насыщенного дня.
+
+OPIUM — сорт с характером, который сочетает мощность, насыщенный вкус и комфортный продолжительный эффект."""
+
+SHH_PRICE = 360
+
+# ФОТО ДЛЯ ГЛАВНОЙ
+MAIN_PHOTO_ID = "AgACAgIAAxkBAAICaGZnH3Jh-p6p7Z0Z0Z0Z0Z0Z0Z0Z0Z"  # БУДЕТ ЗАГРУЖЕННЫЙ ID
+
 # ================== TEXTS ==================
 MAIN_CAPTION = """🏢 Trust City — Premium магазин
 
@@ -71,6 +88,7 @@ PROFILE_TEXT = "👤 Профиль\n\n🏦 Баланс: {balance} {uah}\n🛍�
 HELP_TEXT = "Вопросы? Обратись: @italiansquare"
 RULES_TEXT = "📋 ПРАВИЛА:\n\nДобавь сюда свои правила"
 TOPUP_TEXT = f"💳 Введи сумму пополнения (мин. 10 {UAH}):"
+PROMO_INTRO = "🎟 ПРОМОКОДЫ\n\nВведи промокод для получ��ния бонуса:"
 
 # ================== DB ==================
 pool: asyncpg.Pool | None = None
@@ -110,7 +128,6 @@ async def db_init() -> None:
     pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=10)
 
     async with pool.acquire() as con:
-        # Таблица пользователей
         await con.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id BIGINT PRIMARY KEY,
@@ -121,7 +138,6 @@ async def db_init() -> None:
             )
         """)
 
-        # Таблица товаров
         await con.execute("""
             CREATE TABLE IF NOT EXISTS stock (
                 id BIGSERIAL PRIMARY KEY,
@@ -140,7 +156,6 @@ async def db_init() -> None:
             )
         """)
 
-        # Таблица покупок
         await con.execute("""
             CREATE TABLE IF NOT EXISTS purchases (
                 id BIGSERIAL PRIMARY KEY,
@@ -157,7 +172,6 @@ async def db_init() -> None:
             )
         """)
 
-        # Таблица платежей
         await con.execute("""
             CREATE TABLE IF NOT EXISTS invoices (
                 trade_id TEXT PRIMARY KEY,
@@ -174,7 +188,6 @@ async def db_init() -> None:
             )
         """)
 
-        # Таблица промокодов
         await con.execute("""
             CREATE TABLE IF NOT EXISTS promo_codes (
                 code TEXT PRIMARY KEY,
@@ -186,7 +199,6 @@ async def db_init() -> None:
             )
         """)
 
-        # Таблица использованных промокодов
         await con.execute("""
             CREATE TABLE IF NOT EXISTS promo_usage (
                 id BIGSERIAL PRIMARY KEY,
@@ -221,7 +233,6 @@ async def get_stats(uid: int) -> tuple[decimal.Decimal, int]:
 
 
 async def cleanup_expired() -> None:
-    """Очистка просроченных резерваций и платежей"""
     assert pool is not None
     async with pool.acquire() as con:
         await con.execute("""
@@ -318,10 +329,19 @@ def inline_pay(stock_id: int) -> InlineKeyboardMarkup:
     )
 
 
+def inline_pay_shh() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🛒 КУПИТЬ", callback_data="buy:shh")]
+        ]
+    )
+
+
 def inline_profile() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="💳 Пополнить", callback_data="profile:topup")],
+            [InlineKeyboardButton(text="🎟 Промокод", callback_data="profile:promo")],
             [InlineKeyboardButton(text="🧾 История", callback_data="profile:history")]
         ]
     )
@@ -401,6 +421,10 @@ class TopupStates(StatesGroup):
     waiting_amount = State()
 
 
+class PromoStates(StatesGroup):
+    waiting_code = State()
+
+
 class AddStockStates(StatesGroup):
     waiting_photo = State()
 
@@ -417,7 +441,7 @@ async def cmd_start(message: Message):
     
     try:
         await message.answer_photo(
-            photo="https://i.postimg.cc/0jQVyKJX/italian-square.jpg",
+            photo=MAIN_PHOTO_ID,
             caption=caption,
             reply_markup=bottom_menu()
         )
@@ -434,7 +458,7 @@ async def btn_main(message: Message):
     
     try:
         await message.answer_photo(
-            photo="https://i.postimg.cc/0jQVyKJX/italian-square.jpg",
+            photo=MAIN_PHOTO_ID,
             caption=caption,
             reply_markup=inline_city()
         )
@@ -470,61 +494,54 @@ async def cb_noop(call: CallbackQuery):
 async def cb_city(call: CallbackQuery):
     await call.answer()
     city = call.data.split(":")[1]
-    assert pool is not None
-
-    async with pool.acquire() as con:
-        rows = await con.fetch("""
-            SELECT DISTINCT product_name, price
-            FROM stock
-            WHERE city=$1 AND is_active=TRUE AND sold_at IS NULL
-            ORDER BY product_name
-        """, city)
-
-    if not rows:
-        await call.message.answer("Товаров нет")
-        return
-
-    await call.message.answer("Выбери товар:", reply_markup=inline_products(rows, city))
-
-
-@dp.callback_query(F.data.startswith("prod:"))
-async def cb_product(call: CallbackQuery):
-    await call.answer()
-    parts = call.data.split(":", 2)
-    if len(parts) < 3:
-        await call.message.answer("❌ Ошибка")
-        return
     
-    city = parts[1]
-    product = parts[2]
-    assert pool is not None
+    # ПОКАЗЫВАЕМ ШШ (OPIUM)
+    text = f"""✅ Выбран товар: ШШ (OPIUM)
+💰 Цена: {SHH_PRICE} {UAH}
 
+{SHH_DESCRIPTION}"""
+
+    try:
+        await call.message.answer_photo(
+            photo=SHH_PHOTO_ID,
+            caption=text,
+            reply_markup=inline_pay_shh()
+        )
+    except Exception as e:
+        print(f"[PHOTO ERROR] {e}")
+        await call.message.answer(text, reply_markup=inline_pay_shh())
+
+
+@dp.callback_query(F.data == "buy:shh")
+async def cb_buy_shh(call: CallbackQuery):
+    await call.answer()
+    
+    assert pool is not None
     async with pool.acquire() as con:
         rows = await con.fetch("""
-            SELECT id, district, price, description, photo_id
+            SELECT id, district, price, description
             FROM stock
-            WHERE city=$1 AND product_name=$2 AND is_active=TRUE AND sold_at IS NULL
+            WHERE product_name='ШШ' AND is_active=TRUE AND sold_at IS NULL
               AND (reserved_until IS NULL OR reserved_until < NOW())
             ORDER BY district
-        """, city, product)
+        """)
 
     if not rows:
-        await call.message.answer("❌ Нет в наличии")
+        await call.message.answer("❌ ШШ нет в наличии ни в одном районе")
         return
 
-    await call.message.answer(f"Выбери район для {product}:", reply_markup=inline_districts(rows, city, product))
+    await call.message.answer("📍 Выбери район:", reply_markup=inline_districts(rows, "shh_city", "ШШ"))
 
 
 @dp.callback_query(F.data.startswith("district:"))
 async def cb_district(call: CallbackQuery):
     await call.answer()
     parts = call.data.split(":", 3)
+    
     if len(parts) < 4:
         await call.message.answer("❌ Ошибка")
         return
     
-    city = parts[1]
-    product = parts[2]
     stock_id = int(parts[3])
     
     assert pool is not None
@@ -698,7 +715,6 @@ async def cb_pay_card(call: CallbackQuery):
                     await call.message.answer("❌ Товар недоступен")
                     return
 
-                # РЕЗЕРВИРУЕМ НА 15 МИНУТ
                 reserve_until = get_ukraine_time() + timedelta(minutes=RESERVATION_MINUTES)
                 await con.execute(
                     "UPDATE stock SET reserved_by=$2, reserved_until=$3 WHERE id=$1",
@@ -737,7 +753,7 @@ async def cb_pay_card(call: CallbackQuery):
             f"Карта: {card_number}\n"
             f"Сумма: {real_amount} {PAYSYNC_CURRENCY}\n"
             f"Срок: до {expire_text}\n\n"
-            "⏱ Товар зарезервирован на {0} минут\n".format(RESERVATION_MINUTES)+
+            f"⏱ Товар зарезервирован на {RESERVATION_MINUTES} минут\n"
             "Оплати точно указанную сумму одним платежом"
         )
         await call.message.answer(text, reply_markup=inline_check(trade_id))
@@ -855,7 +871,6 @@ async def cb_check(call: CallbackQuery):
 
         elif status in {"expired", "cancelled", "canceled", "failed"}:
             async with pool.acquire() as con:
-                # Снимаем резервацию
                 await con.execute(
                     "UPDATE stock SET reserved_by=NULL, reserved_until=NULL WHERE id=$1 AND reserved_by=$2",
                     inv["stock_id"], inv["user_id"]
@@ -905,6 +920,72 @@ async def cb_history(call: CallbackQuery):
     await call.message.answer(text)
 
 
+@dp.callback_query(F.data == "profile:promo")
+async def cb_promo(call: CallbackQuery, state: FSMContext):
+    await call.answer()
+    await state.set_state(PromoStates.waiting_code)
+    await call.message.answer(PROMO_INTRO)
+
+
+@dp.message(PromoStates.waiting_code)
+async def promo_code(message: Message, state: FSMContext):
+    code = message.text.strip().upper()
+    uid = message.from_user.id
+
+    try:
+        assert pool is not None
+
+        async with pool.acquire() as con:
+            promo = await con.fetchrow(
+                "SELECT * FROM promo_codes WHERE code=$1 AND is_active=TRUE",
+                code
+            )
+
+            if not promo:
+                await message.answer("❌ Промокод не найден")
+                await state.clear()
+                return
+
+            if promo["current_uses"] >= promo["max_uses"]:
+                await message.answer("❌ Промокод исчерпан")
+                await state.clear()
+                return
+
+            used = await con.fetchval(
+                "SELECT COUNT(*) FROM promo_usage WHERE user_id=$1 AND promo_code=$2",
+                uid, code
+            )
+
+            if used:
+                await message.answer("❌ Ты уже использовал этот промокод")
+                await state.clear()
+                return
+
+            async with con.transaction():
+                await con.execute(
+                    "UPDATE users SET balance = balance + $2 WHERE user_id = $1",
+                    uid, promo["discount_amount"]
+                )
+
+                await con.execute(
+                    "INSERT INTO promo_usage(user_id, promo_code) VALUES($1, $2)",
+                    uid, code
+                )
+
+                await con.execute(
+                    "UPDATE promo_codes SET current_uses = current_uses + 1 WHERE code = $1",
+                    code
+                )
+
+        await message.answer(f"✅ Промокод активирован!\nДобавлено: {promo['discount_amount']} {UAH}")
+
+    except Exception as e:
+        print(f"[PROMO ERROR] {repr(e)}")
+        await message.answer(f"❌ Ошибка: {str(e)[:200]}")
+    finally:
+        await state.clear()
+
+
 # ================== ADMIN COMMANDS ==================
 @dp.message(F.text.startswith("/addstock"))
 async def cmd_add_stock(message: Message, state: FSMContext):
@@ -951,7 +1032,7 @@ async def handle_stock_photo(message: Message, state: FSMContext):
                 data["city"], data["product"], data["district"], data["price"], photo_id, data["desc"]
             )
 
-        await message.answer(f"✅ Товар добавлен\n{data['product']} ({data['district']})")
+        await message.answer(f"✅ Товар добавлен\n{data['product']} ({data['district']})\nPhoto ID: {photo_id}")
 
     except Exception as e:
         await message.answer(f"❌ Ошибка: {str(e)[:300]}")
@@ -1043,6 +1124,41 @@ async def cmd_sales(message: Message):
 ━━━━━━━━━━━━━━\n"""
 
         await message.answer(text)
+
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {str(e)[:300]}")
+
+
+@dp.message(F.text.startswith("/addpromo"))
+async def cmd_add_promo(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+
+    try:
+        raw = message.text.replace("/addpromo", "", 1).strip()
+        parts = [p.strip() for p in raw.split("|")]
+
+        if len(parts) < 3:
+            await message.answer("Формат: /addpromo КОД | СУММА | МАКС_ИСПОЛЬЗОВАНИЙ")
+            return
+
+        code = parts[0].upper()
+        discount = int(parts[1])
+        max_uses = int(parts[2])
+
+        assert pool is not None
+        async with pool.acquire() as con:
+            await con.execute("""
+                INSERT INTO promo_codes(code, discount_amount, max_uses, is_active)
+                VALUES($1, $2, $3, TRUE)
+                ON CONFLICT(code) DO UPDATE SET
+                    discount_amount=EXCLUDED.discount_amount,
+                    max_uses=EXCLUDED.max_uses,
+                    is_active=TRUE,
+                    current_uses=0
+            """, code, discount, max_uses)
+
+        await message.answer(f"✅ Промокод {code}: {discount} {UAH} × {max_uses}")
 
     except Exception as e:
         await message.answer(f"❌ Ошибка: {str(e)[:300]}")
