@@ -31,6 +31,9 @@ PAYSYNC_APIKEY = os.getenv("PAYSYNC_APIKEY", "").strip()
 PAYSYNC_CLIENT_ID_RAW = os.getenv("PAYSYNC_CLIENT_ID", "").strip()
 PAYSYNC_CURRENCY = os.getenv("PAYSYNC_CURRENCY", "UAH").strip().upper()
 
+# CRYPTO PAY
+CRYPTO_PAY_API_TOKEN = os.getenv("CRYPTO_PAY_API_TOKEN", "").strip()
+
 PAYMENT_TIMEOUT_MINUTES = int(os.getenv("PAYMENT_TIMEOUT_MINUTES", "15"))
 RESERVATION_MINUTES = int(os.getenv("RESERVATION_MINUTES", "15"))
 
@@ -50,23 +53,6 @@ ADMIN_ID = int(ADMIN_ID_RAW)
 CLIENT_ID = int(PAYSYNC_CLIENT_ID_RAW)
 UAH = "₴"
 UKRAINE_TZ = ZoneInfo("Europe/Kyiv")
-
-# ================== ШШ ТОВАР (OPIUM) ==================
-SHH_PHOTO_ID = "AgACAgIAAxkBAAICaGZnH3Jh-p6p7Z0Z0Z0Z0Z0Z0Z0CAAGCejEbZ0Z0Z0Z0Z0Z0Z0Z0Z0Z"  # БУДЕТ ЗАГРУЖЕННЫЙ ID
-SHH_DESCRIPTION = """THC: 22–26%
-
-OPIUM — мощный гибридный сорт с плотным насыщенным эффектом и выразительным ароматом, созданный для тех, кто ценит качество и глубокое расслабление. Шишки плотные, смолистые, с тёмно-зелёными оттенками и возможными фиолетовыми акцентами, что придаёт сорту премиальный внешний вид.
-
-Аромат богатый и многослойный: сладковато-пряные ноты сочетаются с лёгкой землистостью, травянистым фоном и приятным терпким послевкусием. Дым мягкий, густой и насыщенный.
-
-Эффект начинается с заметного подъёма настроения, лёгкой эйфории и приятной ясности, после чего постепенно переходит в глубокий телесный релакс и чувство полного спокойствия. Отлично подходит для вечернего времени, отдыха, музыки и снятия напряжения после насыщенного дня.
-
-OPIUM — сорт с характером, который сочетает мощность, насыщенный вкус и комфортный продолжительный эффект."""
-
-SHH_PRICE = 360
-
-# ФОТО ДЛЯ ГЛАВНОЙ
-MAIN_PHOTO_ID = "AgACAgIAAxkBAAICaGZnH3Jh-p6p7Z0Z0Z0Z0Z0Z0Z0Z0Z"  # БУДЕТ ЗАГРУЖЕННЫЙ ID
 
 # ================== TEXTS ==================
 MAIN_CAPTION = """🏢 Trust City — Premium магазин
@@ -88,7 +74,7 @@ PROFILE_TEXT = "👤 Профиль\n\n🏦 Баланс: {balance} {uah}\n🛍�
 HELP_TEXT = "Вопросы? Обратись: @italiansquare"
 RULES_TEXT = "📋 ПРАВИЛА:\n\nДобавь сюда свои правила"
 TOPUP_TEXT = f"💳 Введи сумму пополнения (мин. 10 {UAH}):"
-PROMO_INTRO = "🎟 ПРОМОКОДЫ\n\nВведи промокод для получ��ния бонуса:"
+PROMO_INTRO = f"🎟 ПРОМОКОДЫ\n\nВведи промокод для получения бонуса:"
 
 # ================== DB ==================
 pool: asyncpg.Pool | None = None
@@ -281,28 +267,6 @@ def inline_city() -> InlineKeyboardMarkup:
     )
 
 
-def inline_products(rows: list, city: str) -> InlineKeyboardMarkup:
-    if not rows:
-        return InlineKeyboardMarkup(
-            inline_keyboard=[[InlineKeyboardButton(text="Нет товаров", callback_data="noop")]]
-        )
-
-    products = {}
-    for r in rows:
-        if r["product_name"] not in products:
-            products[r["product_name"]] = r["price"]
-
-    kb = []
-    for name, price in products.items():
-        kb.append([
-            InlineKeyboardButton(
-                text=f"{name} — {decimal.Decimal(price):.0f} {UAH}",
-                callback_data=f"prod:{city}:{name}"
-            )
-        ])
-    return InlineKeyboardMarkup(inline_keyboard=kb)
-
-
 def inline_districts(rows: list, city: str, product: str) -> InlineKeyboardMarkup:
     if not rows:
         return InlineKeyboardMarkup(
@@ -324,15 +288,8 @@ def inline_pay(stock_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="💰 Баланс", callback_data=f"pay:bal:{stock_id}")],
-            [InlineKeyboardButton(text="💳 PaySync", callback_data=f"pay:card:{stock_id}")]
-        ]
-    )
-
-
-def inline_pay_shh() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="🛒 КУПИТЬ", callback_data="buy:shh")]
+            [InlineKeyboardButton(text="💳 PaySync", callback_data=f"pay:card:{stock_id}")],
+            [InlineKeyboardButton(text="🪙 Crypto", callback_data=f"pay:crypto:{stock_id}")]
         ]
     )
 
@@ -384,6 +341,55 @@ async def paysync_check(trade_id: str) -> dict:
                 return json.loads(raw_text)
             except Exception:
                 raise RuntimeError(f"PaySync JSON: {raw_text[:300]}")
+
+
+async def crypto_pay_create(amount: int, description: str = "Payment") -> dict:
+    """Создает инвойс в Crypto Pay"""
+    url = "https://pay.crypt.bot/api/invoices"
+    headers = {
+        "Crypto-Pay-API-Token": CRYPTO_PAY_API_TOKEN,
+        "Content-Type": "application/json"
+    }
+    
+    payload = {
+        "asset": "USDT",
+        "amount": str(amount),
+        "currency": "UAH",
+        "description": description
+    }
+
+    async with aiohttp.ClientSession() as session:
+        async with session.post(url, headers=headers, json=payload, timeout=30) as resp:
+            raw_text = await resp.text()
+            if resp.status >= 400:
+                raise RuntimeError(f"Crypto HTTP {resp.status}: {raw_text[:300]}")
+            try:
+                data = json.loads(raw_text)
+                if data.get("ok"):
+                    return data.get("result", {})
+                raise RuntimeError(f"Crypto: {data.get('error', 'unknown')}")
+            except Exception as e:
+                raise RuntimeError(f"Crypto: {str(e)[:300]}")
+
+
+async def crypto_pay_check(invoice_id: int) -> dict:
+    """Проверяет статус инвойса в Crypto Pay"""
+    url = f"https://pay.crypt.bot/api/invoices?invoice_ids={invoice_id}"
+    headers = {"Crypto-Pay-API-Token": CRYPTO_PAY_API_TOKEN}
+
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, headers=headers, timeout=30) as resp:
+            raw_text = await resp.text()
+            if resp.status >= 400:
+                raise RuntimeError(f"Crypto HTTP {resp.status}")
+            try:
+                data = json.loads(raw_text)
+                if data.get("ok"):
+                    invoices = data.get("result", {}).get("items", [])
+                    return invoices[0] if invoices else {}
+                raise RuntimeError(f"Crypto: {data.get('error')}")
+            except Exception as e:
+                raise RuntimeError(f"Crypto: {str(e)}")
 
 
 def extract_trade_id(js: dict) -> str:
@@ -439,14 +445,7 @@ async def cmd_start(message: Message):
     bal, orders = await get_stats(message.from_user.id)
     caption = MAIN_CAPTION.format(balance=f"{bal:.2f}", orders=orders, uah=UAH)
     
-    try:
-        await message.answer_photo(
-            photo=MAIN_PHOTO_ID,
-            caption=caption,
-            reply_markup=bottom_menu()
-        )
-    except:
-        await message.answer(caption, reply_markup=bottom_menu())
+    await message.answer(caption, reply_markup=bottom_menu())
 
 
 @dp.message(F.text == "🏠 ГЛАВНАЯ")
@@ -456,14 +455,7 @@ async def btn_main(message: Message):
     bal, orders = await get_stats(message.from_user.id)
     caption = MAIN_CAPTION.format(balance=f"{bal:.2f}", orders=orders, uah=UAH)
     
-    try:
-        await message.answer_photo(
-            photo=MAIN_PHOTO_ID,
-            caption=caption,
-            reply_markup=inline_city()
-        )
-    except:
-        await message.answer(caption, reply_markup=inline_city())
+    await message.answer(caption, reply_markup=inline_city())
 
 
 @dp.message(F.text == "👤 ПРОФИЛЬ")
@@ -494,43 +486,38 @@ async def cb_noop(call: CallbackQuery):
 async def cb_city(call: CallbackQuery):
     await call.answer()
     city = call.data.split(":")[1]
-    
-    # ПОКАЗЫВАЕМ ШШ (OPIUM)
-    text = f"""✅ Выбран товар: ШШ (OPIUM)
-💰 Цена: {SHH_PRICE} {UAH}
+    assert pool is not None
 
-{SHH_DESCRIPTION}"""
+    async with pool.acquire() as con:
+        rows = await con.fetch("""
+            SELECT id, district, price, description, photo_id
+            FROM stock
+            WHERE city=$1 AND product_name='ШШ' AND is_active=TRUE AND sold_at IS NULL
+              AND (reserved_until IS NULL OR reserved_until < NOW())
+            ORDER BY district
+        """, city)
+
+    if not rows:
+        await call.message.answer(f"❌ ШШ нет в наличии в городе {city}")
+        return
+
+    # Берем первый товар ШШ для показа описания
+    item = rows[0]
+    
+    text = f"""✅ Выбран товар: ШШ OPIUM
+💰 Цена: {decimal.Decimal(item['price']):.0f} {UAH}
+
+{item['description']}"""
 
     try:
         await call.message.answer_photo(
-            photo=SHH_PHOTO_ID,
+            photo=item["photo_id"],
             caption=text,
-            reply_markup=inline_pay_shh()
+            reply_markup=inline_districts(rows, city, "ШШ")
         )
     except Exception as e:
         print(f"[PHOTO ERROR] {e}")
-        await call.message.answer(text, reply_markup=inline_pay_shh())
-
-
-@dp.callback_query(F.data == "buy:shh")
-async def cb_buy_shh(call: CallbackQuery):
-    await call.answer()
-    
-    assert pool is not None
-    async with pool.acquire() as con:
-        rows = await con.fetch("""
-            SELECT id, district, price, description
-            FROM stock
-            WHERE product_name='ШШ' AND is_active=TRUE AND sold_at IS NULL
-              AND (reserved_until IS NULL OR reserved_until < NOW())
-            ORDER BY district
-        """)
-
-    if not rows:
-        await call.message.answer("❌ ШШ нет в наличии ни в одном районе")
-        return
-
-    await call.message.answer("📍 Выбери район:", reply_markup=inline_districts(rows, "shh_city", "ШШ"))
+        await call.message.answer(text, reply_markup=inline_districts(rows, city, "ШШ"))
 
 
 @dp.callback_query(F.data.startswith("district:"))
@@ -763,6 +750,79 @@ async def cb_pay_card(call: CallbackQuery):
         await call.message.answer(f"❌ Ошибка: {str(e)[:200]}")
 
 
+@dp.callback_query(F.data.startswith("pay:crypto:"))
+async def cb_pay_crypto(call: CallbackQuery):
+    await call.answer()
+    stock_id = int(call.data.split(":")[2])
+    uid = call.from_user.id
+    username = call.from_user.username or "unknown"
+
+    try:
+        if not CRYPTO_PAY_API_TOKEN:
+            await call.message.answer("❌ Crypto Pay не настроен")
+            return
+
+        assert pool is not None
+
+        async with pool.acquire() as con:
+            async with con.transaction():
+                item = await con.fetchrow(
+                    "SELECT * FROM stock WHERE id=$1 FOR UPDATE", stock_id
+                )
+
+                if not item or item["sold_at"]:
+                    await call.message.answer("❌ Товар недоступен")
+                    return
+
+                reserve_until = get_ukraine_time() + timedelta(minutes=RESERVATION_MINUTES)
+                await con.execute(
+                    "UPDATE stock SET reserved_by=$2, reserved_until=$3 WHERE id=$1",
+                    stock_id, uid, reserve_until
+                )
+
+                price = int(decimal.Decimal(item["price"]))
+
+        invoice = await crypto_pay_create(price, f"Покупка: {item['product_name']}")
+
+        invoice_id = invoice.get("invoice_id")
+        pay_url = invoice.get("pay_url")
+
+        if not invoice_id or not pay_url:
+            raise RuntimeError("Нет данных инвойса")
+
+        expires_at = get_ukraine_time() + timedelta(minutes=PAYMENT_TIMEOUT_MINUTES)
+
+        async with pool.acquire() as con:
+            await con.execute("""
+                INSERT INTO invoices(
+                    trade_id, user_id, kind, amount_int, currency, stock_id, provider, status, expires_at
+                )
+                VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)
+                ON CONFLICT (trade_id) DO NOTHING
+            """,
+                str(invoice_id), uid, "purchase", price, "UAH", stock_id, "crypto", "wait", expires_at
+            )
+
+        text = (
+            "🪙 Оплата Crypto\n\n"
+            f"{item['product_name']}\n"
+            f"📍 {item['district']}\n"
+            f"💰 {price} UAH\n\n"
+            f"⏱ Товар зарезервирован на {RESERVATION_MINUTES} минут"
+        )
+        
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="Открыть платеж", url=pay_url)],
+            [InlineKeyboardButton(text="✅ Проверить оплату", callback_data=f"check:{invoice_id}")]
+        ])
+
+        await call.message.answer(text, reply_markup=kb)
+
+    except Exception as e:
+        print(f"[CRYPTO ERROR] {repr(e)}")
+        await call.message.answer(f"❌ Ошибка: {str(e)[:200]}")
+
+
 @dp.callback_query(F.data.startswith("check:"))
 async def cb_check(call: CallbackQuery):
     await call.answer()
@@ -782,8 +842,19 @@ async def cb_check(call: CallbackQuery):
             await call.message.answer("✅ Счет уже обработан")
             return
 
-        js = await paysync_check(trade_id)
-        status = extract_status(js)
+        if inv["provider"] == "paysync":
+            js = await paysync_check(trade_id)
+            status = extract_status(js)
+        elif inv["provider"] == "crypto":
+            try:
+                js = await crypto_pay_check(int(trade_id))
+                status = js.get("status", "").lower()
+            except:
+                await call.message.answer("⏳ Проверка платежа...")
+                return
+        else:
+            await call.message.answer("❌ Неизвестный провайдер")
+            return
 
         if status in {"paid", "success", "succeeded", "completed"}:
             async with pool.acquire() as con:
@@ -850,7 +921,7 @@ async def cb_check(call: CallbackQuery):
                             VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
                         """,
                             inv["user_id"], username, inv["stock_id"], item["product_name"],
-                            item["district"], item["city"], item["price"], item["photo_id"], "paysync", current_time
+                            item["district"], item["city"], item["price"], item["photo_id"], inv["provider"], current_time
                         )
 
                         await con.execute(
@@ -1032,7 +1103,7 @@ async def handle_stock_photo(message: Message, state: FSMContext):
                 data["city"], data["product"], data["district"], data["price"], photo_id, data["desc"]
             )
 
-        await message.answer(f"✅ Товар добавлен\n{data['product']} ({data['district']})\nPhoto ID: {photo_id}")
+        await message.answer(f"✅ Товар добавлен\n{data['product']} ({data['district']})\nID: {photo_id}")
 
     except Exception as e:
         await message.answer(f"❌ Ошибка: {str(e)[:300]}")
