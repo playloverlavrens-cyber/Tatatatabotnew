@@ -31,7 +31,6 @@ PAYSYNC_APIKEY = os.getenv("PAYSYNC_APIKEY", "").strip()
 PAYSYNC_CLIENT_ID_RAW = os.getenv("PAYSYNC_CLIENT_ID", "").strip()
 PAYSYNC_CURRENCY = os.getenv("PAYSYNC_CURRENCY", "UAH").strip().upper()
 
-# CRYPTO PAY
 CRYPTO_PAY_API_TOKEN = os.getenv("CRYPTO_PAY_API_TOKEN", "").strip()
 
 PAYMENT_TIMEOUT_MINUTES = int(os.getenv("PAYMENT_TIMEOUT_MINUTES", "15"))
@@ -267,7 +266,36 @@ def inline_city() -> InlineKeyboardMarkup:
     )
 
 
+def inline_products(rows: list, city: str) -> InlineKeyboardMarkup:
+    """Показывает все товары (варианты ШШ) в городе"""
+    if not rows:
+        return InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="❌ Нет товаров", callback_data="noop")]]
+        )
+
+    # Группируем товары по названию (убираем дубликаты)
+    products = {}
+    for r in rows:
+        if r["product_name"] not in products:
+            products[r["product_name"]] = {
+                "price": r["price"],
+                "photo_id": r["photo_id"],
+                "description": r["description"]
+            }
+
+    kb = []
+    for name, data in products.items():
+        kb.append([
+            InlineKeyboardButton(
+                text=f"ШШ {name} — {decimal.Decimal(data['price']):.0f} {UAH}",
+                callback_data=f"product:{city}:{name}"
+            )
+        ])
+    return InlineKeyboardMarkup(inline_keyboard=kb)
+
+
 def inline_districts(rows: list, city: str, product: str) -> InlineKeyboardMarkup:
+    """Показывает районы где есть товар в наличии"""
     if not rows:
         return InlineKeyboardMarkup(
             inline_keyboard=[[InlineKeyboardButton(text="❌ Нет в наличии", callback_data="noop")]]
@@ -277,7 +305,7 @@ def inline_districts(rows: list, city: str, product: str) -> InlineKeyboardMarku
     for r in rows:
         kb.append([
             InlineKeyboardButton(
-                text=f"📍 {r['district']}",
+                text=f"📍 {r['district']} — {decimal.Decimal(r['price']):.0f} {UAH}",
                 callback_data=f"district:{city}:{product}:{r['id']}"
             )
         ])
@@ -344,7 +372,6 @@ async def paysync_check(trade_id: str) -> dict:
 
 
 async def crypto_pay_create(amount: int, description: str = "Payment") -> dict:
-    """Создает инвойс в Crypto Pay"""
     url = "https://pay.crypt.bot/api/invoices"
     headers = {
         "Crypto-Pay-API-Token": CRYPTO_PAY_API_TOKEN,
@@ -373,7 +400,6 @@ async def crypto_pay_create(amount: int, description: str = "Payment") -> dict:
 
 
 async def crypto_pay_check(invoice_id: int) -> dict:
-    """Проверяет статус инвойса в Crypto Pay"""
     url = f"https://pay.crypt.bot/api/invoices?invoice_ids={invoice_id}"
     headers = {"Crypto-Pay-API-Token": CRYPTO_PAY_API_TOKEN}
 
@@ -490,34 +516,60 @@ async def cb_city(call: CallbackQuery):
 
     async with pool.acquire() as con:
         rows = await con.fetch("""
-            SELECT id, district, price, description, photo_id
+            SELECT DISTINCT product_name, price, photo_id, description
             FROM stock
-            WHERE city=$1 AND product_name='ШШ' AND is_active=TRUE AND sold_at IS NULL
-              AND (reserved_until IS NULL OR reserved_until < NOW())
-            ORDER BY district
+            WHERE city=$1 AND is_active=TRUE AND sold_at IS NULL
+            ORDER BY product_name
         """, city)
 
     if not rows:
-        await call.message.answer(f"❌ ШШ нет в наличии в городе {city}")
+        await call.message.answer(f"❌ Нет товаров в городе {city}")
         return
 
-    # Берем первый товар ШШ для показа описания
-    item = rows[0]
+    await call.message.answer("📦 Выбери вариант ШШ:", reply_markup=inline_products(rows, city))
+
+
+@dp.callback_query(F.data.startswith("product:"))
+async def cb_product(call: CallbackQuery):
+    await call.answer()
+    parts = call.data.split(":", 2)
+    city = parts[1]
+    product = parts[2]
     
-    text = f"""✅ Выбран товар: ШШ OPIUM
+    assert pool is not None
+    async with pool.acquire() as con:
+        item = await con.fetchrow("""
+            SELECT * FROM stock
+            WHERE city=$1 AND product_name=$2 AND is_active=TRUE AND sold_at IS NULL
+            LIMIT 1
+        """, city, product)
+        
+        rows = await con.fetch("""
+            SELECT id, district, price
+            FROM stock
+            WHERE city=$1 AND product_name=$2 AND is_active=TRUE AND sold_at IS NULL
+              AND (reserved_until IS NULL OR reserved_until < NOW())
+            ORDER BY district
+        """, city, product)
+
+    if not item:
+        await call.message.answer("❌ Товар недоступен")
+        return
+
+    text = f"""✅ Выбран товар: ШШ {item['product_name']}
 💰 Цена: {decimal.Decimal(item['price']):.0f} {UAH}
 
-{item['description']}"""
+{item['description'] or 'Описание отсутствует'}"""
 
     try:
         await call.message.answer_photo(
             photo=item["photo_id"],
             caption=text,
-            reply_markup=inline_districts(rows, city, "ШШ")
+            reply_markup=inline_districts(rows, city, product)
         )
     except Exception as e:
         print(f"[PHOTO ERROR] {e}")
-        await call.message.answer(text, reply_markup=inline_districts(rows, city, "ШШ"))
+        await call.message.answer(text, reply_markup=inline_districts(rows, city, product))
 
 
 @dp.callback_query(F.data.startswith("district:"))
@@ -545,7 +597,7 @@ async def cb_district(call: CallbackQuery):
 💰 Цена: {decimal.Decimal(item['price']):.0f} {UAH}
 📍 Район: {item['district']}
 
-{item['description'] or 'Без описания'}"""
+{item['description'] or 'Описание отсутствует'}"""
 
     try:
         await call.message.answer_photo(
@@ -812,7 +864,7 @@ async def cb_pay_crypto(call: CallbackQuery):
         )
         
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="Открыть платеж", url=pay_url)],
+            [InlineKeyboardButton(text="Открыт�� платеж", url=pay_url)],
             [InlineKeyboardButton(text="✅ Проверить оплату", callback_data=f"check:{invoice_id}")]
         ])
 
@@ -1103,7 +1155,7 @@ async def handle_stock_photo(message: Message, state: FSMContext):
                 data["city"], data["product"], data["district"], data["price"], photo_id, data["desc"]
             )
 
-        await message.answer(f"✅ Товар добавлен\n{data['product']} ({data['district']})\nID: {photo_id}")
+        await message.answer(f"✅ Товар добавлен\n{data['product']} ({data['district']})")
 
     except Exception as e:
         await message.answer(f"❌ Ошибка: {str(e)[:300]}")
@@ -1185,14 +1237,16 @@ async def cmd_sales(message: Message):
             await message.answer("📭 Продажей нет")
             return
 
-        text = "💰 ТАБЛИЦА ПРОДАЖЕЙ (последние 50):\n\n"
+        text = "💰 ТАБЛИЦА ВСЕХ ПРОДАЖ:\n\n"
         for r in rows:
             dt = format_ukraine_time(r["paid_at"])
-            text += f"""UID: {r['user_id']} | @{r['username']}
-📦 {r['product_name']} ({r['city']} - {r['district']})
-💰 {decimal.Decimal(r['price']):.0f} {UAH} | {r['provider']}
-⏰ {dt}
-━━━━━━━━━━━━━━\n"""
+            text += f"""👤 UID: {r['user_id']} | @{r['username']}
+📦 Товар: {r['product_name']}
+📍 Район: {r['district']} ({r['city']})
+💰 Цена: {decimal.Decimal(r['price']):.0f} {UAH}
+💳 Способ: {r['provider'].upper()}
+⏰ Время: {dt}
+━━━━━━━━━━━━━━━━━━\n"""
 
         await message.answer(text)
 
